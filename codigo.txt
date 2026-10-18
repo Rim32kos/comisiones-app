@@ -1124,7 +1124,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- Ajustes ----------
-    fun setDiasRojo(v: Int) {
+    @JvmName("cambiarDiasRojo") fun setDiasRojo(v: Int) {
         ajustes.diasRojo = v
         diasRojo = v
     }
