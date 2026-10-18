@@ -3669,7 +3669,7 @@ object Traductor {
         if (texto.isBlank()) return ""
         descargar()
         // Línea por línea para conservar los saltos de línea del cliente
-        return texto.split("\n").joinToString("\n") { linea ->
+        return texto.split("\n").withIndex().fold("") { acc, (i, linea) -> acc + (if (i == 0) "" else "\n") +
             if (linea.isBlank()) linea else esperar(traductor.translate(linea))
         }
     }
