@@ -1,0 +1,75 @@
+name: Compilar APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Separar el codigo
+        run: |
+          python3 - <<'PY'
+          import os, re
+          cur = None
+          buf = []
+          def guardar():
+              if cur:
+                  d = os.path.dirname(cur)
+                  if d:
+                      os.makedirs(d, exist_ok=True)
+                  with open(cur, 'w', encoding='utf-8') as f:
+                      f.write(''.join(buf))
+          for linea in open('codigo.txt', encoding='utf-8'):
+              m = re.match(r'^@@@ (.+) @@@\s*$', linea)
+              if m:
+                  guardar()
+                  cur = m.group(1)
+                  buf = []
+              else:
+                  buf.append(linea)
+          guardar()
+          PY
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Llave de firma (se crea una sola vez)
+        run: |
+          if [ ! -f firma.jks ]; then
+            keytool -genkeypair -keystore firma.jks -storepass comisiones123 -keypass comisiones123 -alias comisiones -keyalg RSA -keysize 2048 -validity 20000 -dname "CN=Mis Comisiones, O=Personal, C=MX"
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add firma.jks
+            git commit -m "Llave de firma de la app"
+            git push
+          fi
+          cp firma.jks app/firma.jks
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Compilar
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Renombrar APK
+        run: cp app/build/outputs/apk/release/app-release.apk MisComisiones.apk
+
+      - name: Publicar descarga
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.${{ github.run_number }}
+          name: Mis Comisiones v1.${{ github.run_number }}
+          body: "Descarga MisComisiones.apk desde tu Xiaomi e instalalo. Las versiones nuevas se instalan encima sin borrar tus datos."
+          files: MisComisiones.apk
+          make_latest: true
