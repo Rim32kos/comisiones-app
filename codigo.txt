@@ -1,0 +1,3814 @@
+@@@ app/build.gradle.kts @@@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
+}
+
+android {
+    namespace = "com.comisiones.app"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.comisiones.app"
+        minSdk = 29
+        targetSdk = 35
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+    }
+
+    // Llave fija: así cada versión nueva se instala encima sin borrar tus datos.
+    signingConfigs {
+        create("fija") {
+            storeFile = file("firma.jks")
+            storePassword = "comisiones123"
+            keyAlias = "comisiones"
+            keyPassword = "comisiones123"
+        }
+    }
+
+    buildTypes {
+        getByName("debug") { signingConfig = signingConfigs.getByName("fija") }
+        getByName("release") {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("fija")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+    buildFeatures { compose = true }
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
+}
+
+dependencies {
+    val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
+    implementation(composeBom)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.animation:animation")
+
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.navigation:navigation-compose:2.8.5")
+
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.google.mlkit:translate:17.0.3")
+}
+@@@ app/src/main/AndroidManifest.xml @@@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Comisiones">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver android:name=".notif.RecordatorioReceiver" android:exported="false" />
+        <receiver android:name=".notif.DiarioReceiver" android:exported="false" />
+        <receiver android:name=".notif.ArranqueReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>
+@@@ app/src/main/java/com/comisiones/app/App.kt @@@
+package com.comisiones.app
+
+import android.app.Application
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.mutableStateOf
+import com.comisiones.app.notif.Alarmas
+import com.comisiones.app.ui.AppNav
+import com.comisiones.app.ui.TemaComisiones
+
+class App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Alarmas.crearCanales(this)
+        Alarmas.programarDiario(this)
+    }
+}
+
+class MainActivity : ComponentActivity() {
+    private val abrirComision = mutableStateOf<Long?>(null)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        leerIntent(intent)
+        setContent {
+            TemaComisiones {
+                AppNav(abrirComision)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        leerIntent(intent)
+    }
+
+    private fun leerIntent(i: Intent?) {
+        val id = i?.getLongExtra(Alarmas.EXTRA_COMISION, -1L) ?: -1L
+        if (id > 0) {
+            abrirComision.value = id
+            i?.removeExtra(Alarmas.EXTRA_COMISION)
+        }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/data/Dao.kt @@@
+package com.comisiones.app.data
+
+import android.content.Context
+import androidx.room.Dao
+import androidx.room.Database
+import androidx.room.Delete
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.Update
+import kotlinx.coroutines.flow.Flow
+
+private const val RESUMEN_CLIENTES = """
+    SELECT c.*,
+      (SELECT COUNT(*) FROM commissions m WHERE m.clientId = c.id AND m.completed = 0) AS activeCount,
+      (SELECT COUNT(*) FROM commissions m WHERE m.clientId = c.id) AS totalCount,
+      (SELECT MAX(m.lastWorkedAt) FROM commissions m WHERE m.clientId = c.id AND m.completed = 0) AS lastWorked
+    FROM clients c ORDER BY c.name COLLATE NOCASE
+"""
+
+@Dao
+interface AppDao {
+    // ---------- Clientes ----------
+    @Query(RESUMEN_CLIENTES)
+    fun clientSummaries(): Flow<List<ClientSummary>>
+
+    @Query(RESUMEN_CLIENTES)
+    suspend fun clientSummariesNow(): List<ClientSummary>
+
+    @Query("SELECT * FROM clients WHERE id = :id")
+    fun client(id: Long): Flow<Client?>
+
+    @Query("SELECT * FROM clients WHERE id = :id")
+    suspend fun clientNow(id: Long): Client?
+
+    @Insert
+    suspend fun insertClient(c: Client): Long
+
+    @Update
+    suspend fun updateClient(c: Client)
+
+    @Delete
+    suspend fun deleteClient(c: Client)
+
+    // ---------- Comisiones ----------
+    @Query("SELECT * FROM commissions WHERE clientId = :clientId ORDER BY completed ASC, createdAt DESC")
+    fun commissionsOf(clientId: Long): Flow<List<Commission>>
+
+    @Query("SELECT * FROM commissions WHERE clientId = :clientId")
+    suspend fun commissionsOfNow(clientId: Long): List<Commission>
+
+    @Query("SELECT * FROM commissions WHERE id = :id")
+    fun commission(id: Long): Flow<Commission?>
+
+    @Query("SELECT * FROM commissions WHERE id = :id")
+    suspend fun commissionNow(id: Long): Commission?
+
+    @Query("SELECT m.*, c.name AS clientName FROM commissions m JOIN clients c ON c.id = m.clientId ORDER BY m.completed ASC, m.createdAt DESC")
+    fun allCommissions(): Flow<List<CommissionWithClient>>
+
+    @Query("SELECT m.*, c.name AS clientName FROM commissions m JOIN clients c ON c.id = m.clientId WHERE m.completed = 0 ORDER BY m.lastWorkedAt ASC")
+    suspend fun activeCommissionsNow(): List<CommissionWithClient>
+
+    @Query("SELECT * FROM commissions WHERE reminderAt IS NOT NULL")
+    suspend fun withRemindersNow(): List<Commission>
+
+    @Insert
+    suspend fun insertCommission(m: Commission): Long
+
+    @Update
+    suspend fun updateCommission(m: Commission)
+
+    @Delete
+    suspend fun deleteCommission(m: Commission)
+
+    @Query("UPDATE commissions SET reminderAt = NULL WHERE id = :id")
+    suspend fun clearReminder(id: Long)
+
+    // ---------- Referencias ----------
+    @Query("SELECT * FROM refs WHERE commissionId = :id ORDER BY createdAt")
+    fun refsOf(id: Long): Flow<List<Reference>>
+
+    @Query("SELECT * FROM refs WHERE commissionId = :id ORDER BY createdAt")
+    suspend fun refsOfNow(id: Long): List<Reference>
+
+    @Query("SELECT r.* FROM refs r JOIN commissions m ON m.id = r.commissionId WHERE m.clientId = :clientId")
+    suspend fun refsOfClientNow(clientId: Long): List<Reference>
+
+    @Query("SELECT * FROM refs WHERE kind = 0 ORDER BY createdAt")
+    fun allImageRefs(): Flow<List<Reference>>
+
+    @Query("SELECT * FROM refs WHERE id = :id")
+    suspend fun refNow(id: Long): Reference?
+
+    @Insert
+    suspend fun insertRef(r: Reference): Long
+
+    @Update
+    suspend fun updateRef(r: Reference)
+
+    @Delete
+    suspend fun deleteRef(r: Reference)
+
+    // ---------- Etiquetas ----------
+    @Query("SELECT t.*, COUNT(ct.commissionId) AS uses FROM tags t LEFT JOIN commission_tags ct ON ct.tagId = t.id GROUP BY t.id ORDER BY uses DESC, t.name COLLATE NOCASE")
+    fun tagCounts(): Flow<List<TagCount>>
+
+    @Query("SELECT t.* FROM tags t JOIN commission_tags ct ON ct.tagId = t.id WHERE ct.commissionId = :id ORDER BY t.type, t.name COLLATE NOCASE")
+    fun tagsOf(id: Long): Flow<List<Tag>>
+
+    @Query("SELECT * FROM tags WHERE nameKey = :key AND type = :type LIMIT 1")
+    suspend fun findTag(key: String, type: Int): Tag?
+
+    @Query("SELECT * FROM tags WHERE id = :id")
+    fun tag(id: Long): Flow<Tag?>
+
+    @Insert
+    suspend fun insertTag(t: Tag): Long
+
+    @Delete
+    suspend fun deleteTag(t: Tag)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun linkTag(ct: CommissionTag)
+
+    @Query("DELETE FROM commission_tags WHERE commissionId = :commissionId AND tagId = :tagId")
+    suspend fun unlinkTag(commissionId: Long, tagId: Long)
+
+    @Query("SELECT m.*, c.name AS clientName FROM commissions m JOIN clients c ON c.id = m.clientId JOIN commission_tags ct ON ct.commissionId = m.id WHERE ct.tagId = :tagId ORDER BY m.createdAt DESC")
+    fun commissionsWithTag(tagId: Long): Flow<List<CommissionWithClient>>
+
+    // ---------- Horario ----------
+    @Query("SELECT s.*, c.name AS clientName FROM schedule s JOIN clients c ON c.id = s.clientId ORDER BY s.dayOfWeek, s.position")
+    fun schedule(): Flow<List<SlotWithClient>>
+
+    @Query("SELECT s.*, c.name AS clientName FROM schedule s JOIN clients c ON c.id = s.clientId WHERE s.dayOfWeek = :day ORDER BY s.position")
+    suspend fun scheduleForDayNow(day: Int): List<SlotWithClient>
+
+    @Insert
+    suspend fun insertSlot(s: ScheduleSlot): Long
+
+    @Delete
+    suspend fun deleteSlot(s: ScheduleSlot)
+
+    @Query("DELETE FROM schedule")
+    suspend fun clearSchedule()
+}
+
+@Database(
+    entities = [Client::class, Commission::class, Reference::class, Tag::class, CommissionTag::class, ScheduleSlot::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun dao(): AppDao
+
+    companion object {
+        @Volatile
+        private var instancia: AppDatabase? = null
+
+        fun get(ctx: Context): AppDatabase =
+            instancia ?: synchronized(this) {
+                instancia ?: Room.databaseBuilder(ctx.applicationContext, AppDatabase::class.java, "comisiones.db")
+                    .build()
+                    .also { instancia = it }
+            }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/data/Entidades.kt @@@
+package com.comisiones.app.data
+
+import androidx.room.Embedded
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+
+object Etapas {
+    val nombres = listOf("Boceto", "Lineart", "Color base", "Coloreado final")
+}
+
+object TipoEtiqueta {
+    const val PERSONAJE = 0
+    const val POSE = 1
+    const val OC = 2
+    const val OTRA = 3
+    val nombres = listOf("Personajes", "Poses", "OCs", "Otras")
+    val singular = listOf("Personaje", "Pose", "OC", "Otra")
+}
+
+@Entity(tableName = "clients")
+data class Client(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val contact: String = "",
+    val notes: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "commissions",
+    foreignKeys = [ForeignKey(
+        entity = Client::class,
+        parentColumns = ["id"],
+        childColumns = ["clientId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("clientId")]
+)
+data class Commission(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val clientId: Long,
+    val title: String,
+    val descriptionEn: String = "",
+    val descriptionEs: String = "",
+    val stage: Int = 0,
+    val completed: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis(),
+    val lastWorkedAt: Long = System.currentTimeMillis(),
+    val completedAt: Long? = null,
+    val reminderAt: Long? = null,
+    val reminderNote: String = ""
+)
+
+// kind: 0 = imagen, 1 = texto
+@Entity(
+    tableName = "refs",
+    foreignKeys = [ForeignKey(
+        entity = Commission::class,
+        parentColumns = ["id"],
+        childColumns = ["commissionId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("commissionId")]
+)
+data class Reference(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val commissionId: Long,
+    val kind: Int,
+    val imagePath: String = "",
+    val textEn: String = "",
+    val textEs: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "tags",
+    indices = [Index(value = ["nameKey", "type"], unique = true)]
+)
+data class Tag(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val nameKey: String,
+    val type: Int
+)
+
+@Entity(
+    tableName = "commission_tags",
+    primaryKeys = ["commissionId", "tagId"],
+    foreignKeys = [
+        ForeignKey(entity = Commission::class, parentColumns = ["id"], childColumns = ["commissionId"], onDelete = ForeignKey.CASCADE),
+        ForeignKey(entity = Tag::class, parentColumns = ["id"], childColumns = ["tagId"], onDelete = ForeignKey.CASCADE)
+    ],
+    indices = [Index("tagId")]
+)
+data class CommissionTag(
+    val commissionId: Long,
+    val tagId: Long
+)
+
+// dayOfWeek: 1 = lunes … 7 = domingo
+@Entity(
+    tableName = "schedule",
+    foreignKeys = [ForeignKey(
+        entity = Client::class,
+        parentColumns = ["id"],
+        childColumns = ["clientId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("clientId")]
+)
+data class ScheduleSlot(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val dayOfWeek: Int,
+    val clientId: Long,
+    val position: Int = 0
+)
+
+// ---------- Resultados de consultas ----------
+
+data class ClientSummary(
+    @Embedded val client: Client,
+    val activeCount: Int,
+    val totalCount: Int,
+    val lastWorked: Long?
+)
+
+data class CommissionWithClient(
+    @Embedded val commission: Commission,
+    val clientName: String
+)
+
+data class TagCount(
+    @Embedded val tag: Tag,
+    val uses: Int
+)
+
+data class SlotWithClient(
+    @Embedded val slot: ScheduleSlot,
+    val clientName: String
+)
+@@@ app/src/main/java/com/comisiones/app/notif/Alarmas.kt @@@
+package com.comisiones.app.notif
+
+import android.Manifest
+import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.comisiones.app.MainActivity
+import com.comisiones.app.R
+import com.comisiones.app.data.AppDatabase
+import com.comisiones.app.data.Etapas
+import com.comisiones.app.util.Ajustes
+import com.comisiones.app.util.diasDesde
+import com.comisiones.app.util.hoyNumero
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.time.ZonedDateTime
+
+object Alarmas {
+    const val CANAL_RECORDATORIOS = "recordatorios"
+    const val CANAL_DIARIO = "diario"
+    const val EXTRA_COMISION = "comisionId"
+    private const val REQ_DIARIO = 999_999
+    private const val NOTIF_DIARIO = 999_998
+    private const val FLAGS = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+    fun crearCanales(ctx: Context) {
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(
+            NotificationChannel(CANAL_RECORDATORIOS, "Recordatorios de comisiones", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Los recordatorios que pones en cada comisión"
+                enableVibration(true)
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CANAL_DIARIO, "Resumen diario", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "A quién te toca dibujar hoy y qué comisiones van atrasadas"
+            }
+        )
+    }
+
+    private fun programar(ctx: Context, en: Long, pi: PendingIntent) {
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        try {
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, en, pi)
+            } else {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, en, pi)
+            }
+        } catch (e: SecurityException) {
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, en, pi)
+        }
+    }
+
+    private fun piRecordatorio(ctx: Context, id: Long): PendingIntent =
+        PendingIntent.getBroadcast(
+            ctx, id.toInt(),
+            Intent(ctx, RecordatorioReceiver::class.java).putExtra(EXTRA_COMISION, id),
+            FLAGS
+        )
+
+    fun programarRecordatorio(ctx: Context, id: Long, en: Long) {
+        programar(ctx, en.coerceAtLeast(System.currentTimeMillis() + 3_000), piRecordatorio(ctx, id))
+    }
+
+    fun cancelarRecordatorio(ctx: Context, id: Long) {
+        ctx.getSystemService(AlarmManager::class.java).cancel(piRecordatorio(ctx, id))
+    }
+
+    fun programarDiario(ctx: Context) {
+        val aj = Ajustes(ctx)
+        val pi = PendingIntent.getBroadcast(ctx, REQ_DIARIO, Intent(ctx, DiarioReceiver::class.java), FLAGS)
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        am.cancel(pi)
+        if (!aj.diarioActivo) return
+        val ahora = ZonedDateTime.now()
+        var t = ahora.withHour(aj.diarioHora).withMinute(aj.diarioMinuto).withSecond(0).withNano(0)
+        if (!t.isAfter(ahora)) t = t.plusDays(1)
+        programar(ctx, t.toInstant().toEpochMilli(), pi)
+    }
+
+    fun abrirApp(ctx: Context, comisionId: Long?): PendingIntent {
+        val i = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            if (comisionId != null) putExtra(EXTRA_COMISION, comisionId)
+        }
+        return PendingIntent.getActivity(ctx, ((comisionId ?: 0L) + 1).toInt(), i, FLAGS)
+    }
+
+    fun puedeNotificar(ctx: Context): Boolean =
+        Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
+    fun notificar(ctx: Context, idNotif: Int, canal: String, titulo: String, texto: String, pi: PendingIntent) {
+        if (!puedeNotificar(ctx)) return
+        val n = NotificationCompat.Builder(ctx, canal)
+            .setSmallIcon(R.drawable.ic_notif)
+            .setColor(0xFFFF8FC7.toInt())
+            .setContentTitle(titulo)
+            .setContentText(texto)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(texto))
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        try {
+            NotificationManagerCompat.from(ctx).notify(idNotif, n)
+        } catch (e: SecurityException) {
+            // sin permiso
+        }
+    }
+
+    // Resumen diario: a quién toca hoy + comisiones atrasadas.
+    suspend fun enviarResumen(ctx: Context) {
+        val dao = AppDatabase.get(ctx).dao()
+        val rojo = Ajustes(ctx).diasRojo
+        val hoy = dao.scheduleForDayNow(hoyNumero()).map { it.clientName }.distinct()
+        val atrasadas = dao.activeCommissionsNow().filter { diasDesde(it.commission.lastWorkedAt) >= rojo }
+        if (hoy.isEmpty() && atrasadas.isEmpty()) return
+        val texto = buildString {
+            if (hoy.isNotEmpty()) append("Hoy toca dibujar: ").append(hoy.joinToString(", "))
+            if (atrasadas.isNotEmpty()) {
+                if (isNotEmpty()) append("\n")
+                append("⚠ ${atrasadas.size} comisión(es) sin avance hace $rojo+ días:")
+                atrasadas.take(4).forEach {
+                    append("\n• ${it.commission.title} (${it.clientName}) — ${diasDesde(it.commission.lastWorkedAt)} días")
+                }
+            }
+        }
+        notificar(ctx, NOTIF_DIARIO, CANAL_DIARIO, "🎨 Tu plan de dibujo de hoy", texto, abrirApp(ctx, null))
+    }
+}
+
+class RecordatorioReceiver : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) {
+        val id = intent.getLongExtra(Alarmas.EXTRA_COMISION, -1L)
+        if (id < 0) return
+        val pendiente = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val dao = AppDatabase.get(ctx).dao()
+                val m = dao.commissionNow(id)
+                if (m != null) {
+                    val cliente = dao.clientNow(m.clientId)?.name ?: ""
+                    dao.clearReminder(id)
+                    val texto = buildString {
+                        append(cliente)
+                        if (m.reminderNote.isNotBlank()) append(" — ").append(m.reminderNote)
+                        append("\nVas en: ")
+                        append(if (m.completed) "Terminada ✓" else Etapas.nombres.getOrElse(m.stage) { "" })
+                    }
+                    Alarmas.notificar(ctx, id.toInt(), Alarmas.CANAL_RECORDATORIOS, "⏰ ${m.title}", texto, Alarmas.abrirApp(ctx, id))
+                }
+            } finally {
+                pendiente.finish()
+            }
+        }
+    }
+}
+
+class DiarioReceiver : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) {
+        val pendiente = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                Alarmas.enviarResumen(ctx)
+            } catch (e: Exception) {
+                // ignorar
+            } finally {
+                Alarmas.programarDiario(ctx)
+                pendiente.finish()
+            }
+        }
+    }
+}
+
+// Al reiniciar el teléfono o actualizar la app, vuelve a programar todo.
+class ArranqueReceiver : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) {
+        val pendiente = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                Alarmas.crearCanales(ctx)
+                Alarmas.programarDiario(ctx)
+                AppDatabase.get(ctx).dao().withRemindersNow().forEach { m ->
+                    val en = m.reminderAt
+                    if (en != null) Alarmas.programarRecordatorio(ctx, m.id, en)
+                }
+            } finally {
+                pendiente.finish()
+            }
+        }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/AppNav.kt @@@
+package com.comisiones.app.ui
+
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.LocalOffer
+import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.comisiones.app.notif.Alarmas
+import com.comisiones.app.ui.screens.AjustesScreen
+import com.comisiones.app.ui.screens.ClienteScreen
+import com.comisiones.app.ui.screens.ClientesScreen
+import com.comisiones.app.ui.screens.ComisionScreen
+import com.comisiones.app.ui.screens.EtiquetaScreen
+import com.comisiones.app.ui.screens.EtiquetasScreen
+import com.comisiones.app.ui.screens.FichaScreen
+import com.comisiones.app.ui.screens.GaleriaScreen
+import com.comisiones.app.ui.screens.HorarioScreen
+
+private data class Seccion(val ruta: String, val nombre: String, val icono: ImageVector)
+
+@Composable
+fun AppNav(abrirComision: MutableState<Long?>) {
+    val vm: AppViewModel = viewModel()
+    val nav = rememberNavController()
+    val ctx = LocalContext.current
+    val snack = remember { SnackbarHostState() }
+
+    val permiso = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && !Alarmas.puedeNotificar(ctx) && !vm.ajustes.permisoPedido) {
+            vm.ajustes.permisoPedido = true
+            permiso.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    LaunchedEffect(Unit) { vm.mensajes.collect { snack.showSnackbar(it) } }
+
+    val entrada by nav.currentBackStackEntryAsState()
+    val ruta = entrada?.destination?.route
+
+    // Al tocar una notificación, abre directo esa comisión
+    val pendiente = abrirComision.value
+    val listo = entrada != null
+    LaunchedEffect(pendiente, listo) {
+        if (pendiente != null && listo) {
+            nav.navigate("comision/$pendiente") { launchSingleTop = true }
+            abrirComision.value = null
+        }
+    }
+
+    val secciones = listOf(
+        Seccion("clientes", "Clientes", Icons.Default.People),
+        Seccion("horario", "Horario", Icons.Default.CalendarMonth),
+        Seccion("galeria", "Galería", Icons.Default.PhotoLibrary),
+        Seccion("etiquetas", "Etiquetas", Icons.Default.LocalOffer)
+    )
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets.navigationBars,
+        snackbarHost = { SnackbarHost(snack) },
+        bottomBar = {
+            if (secciones.any { it.ruta == ruta }) {
+                NavigationBar {
+                    secciones.forEach { s ->
+                        NavigationBarItem(
+                            selected = ruta == s.ruta,
+                            onClick = {
+                                nav.navigate(s.ruta) {
+                                    popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(s.icono, contentDescription = null) },
+                            label = { Text(s.nombre, maxLines = 1) }
+                        )
+                    }
+                }
+            }
+        }
+    ) { pad ->
+        NavHost(nav, startDestination = "clientes", modifier = Modifier.padding(pad)) {
+            composable("clientes") { ClientesScreen(vm, nav) }
+            composable("horario") { HorarioScreen(vm, nav) }
+            composable("galeria") { GaleriaScreen(vm, nav) }
+            composable("etiquetas") { EtiquetasScreen(vm, nav) }
+            composable("ajustes") { AjustesScreen(vm, nav) }
+            composable("cliente/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) {
+                ClienteScreen(vm, nav, it.arguments?.getLong("id") ?: 0L)
+            }
+            composable("comision/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) {
+                ComisionScreen(vm, nav, it.arguments?.getLong("id") ?: 0L)
+            }
+            composable("ficha/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) {
+                FichaScreen(vm, nav, it.arguments?.getLong("id") ?: 0L)
+            }
+            composable("etiqueta/{id}", arguments = listOf(navArgument("id") { type = NavType.LongType })) {
+                EtiquetaScreen(vm, nav, it.arguments?.getLong("id") ?: 0L)
+            }
+        }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/AppViewModel.kt @@@
+package com.comisiones.app.ui
+
+import android.app.Application
+import android.content.Context
+import android.net.Uri
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.room.withTransaction
+import com.comisiones.app.data.AppDatabase
+import com.comisiones.app.data.Client
+import com.comisiones.app.data.Commission
+import com.comisiones.app.data.CommissionTag
+import com.comisiones.app.data.Reference
+import com.comisiones.app.data.ScheduleSlot
+import com.comisiones.app.data.Tag
+import com.comisiones.app.notif.Alarmas
+import com.comisiones.app.util.Ajustes
+import com.comisiones.app.util.Archivos
+import com.comisiones.app.util.Ficha
+import com.comisiones.app.util.Traductor
+import com.comisiones.app.util.formatoFecha
+import com.comisiones.app.util.hoyNumero
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+
+class AppViewModel(app: Application) : AndroidViewModel(app) {
+    private val db = AppDatabase.get(app)
+    private val dao = db.dao()
+    private val ctx: Context get() = getApplication()
+    val ajustes = Ajustes(app)
+
+    private fun <T> Flow<List<T>>.estado(): StateFlow<List<T>> =
+        stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val clients = dao.clientSummaries().estado()
+    val allCommissions = dao.allCommissions().estado()
+    val tagCounts = dao.tagCounts().estado()
+    val schedule = dao.schedule().estado()
+    val imageRefs = dao.allImageRefs().estado()
+
+    var diasRojo by mutableIntStateOf(ajustes.diasRojo)
+        private set
+
+    // Claves "d<id>" (descripción), "r<id>" (referencia) o "modelo" mientras se traduce.
+    val traduciendo = mutableStateMapOf<String, Boolean>()
+    val mensajes = MutableSharedFlow<String>(extraBufferCapacity = 8)
+
+    private fun aviso(t: String) {
+        mensajes.tryEmit(t)
+    }
+
+    // ---------- Lecturas ----------
+    fun client(id: Long) = dao.client(id)
+    fun commissionsOf(id: Long) = dao.commissionsOf(id)
+    fun commission(id: Long) = dao.commission(id)
+    fun refsOf(id: Long) = dao.refsOf(id)
+    fun tagsOf(id: Long) = dao.tagsOf(id)
+    fun tag(id: Long) = dao.tag(id)
+    fun commissionsWithTag(id: Long) = dao.commissionsWithTag(id)
+
+    // ---------- Clientes ----------
+    fun guardarCliente(c: Client) = viewModelScope.launch {
+        if (c.name.isBlank()) return@launch
+        if (c.id == 0L) {
+            dao.insertClient(c)
+            aviso("Cliente agregado")
+        } else {
+            dao.updateClient(c)
+        }
+    }
+
+    fun borrarCliente(c: Client) = viewModelScope.launch {
+        dao.commissionsOfNow(c.id).forEach { Alarmas.cancelarRecordatorio(ctx, it.id) }
+        val refs = dao.refsOfClientNow(c.id)
+        dao.deleteClient(c)
+        withContext(Dispatchers.IO) { refs.forEach { Archivos.borrar(it.imagePath) } }
+        aviso("Cliente eliminado")
+    }
+
+    // ---------- Comisiones ----------
+    fun crearComision(clientId: Long, titulo: String, descEn: String, alCrear: (Long) -> Unit) = viewModelScope.launch {
+        val id = dao.insertCommission(
+            Commission(clientId = clientId, title = titulo.trim(), descriptionEn = descEn.trim())
+        )
+        alCrear(id)
+        if (descEn.isNotBlank()) traducirDescripcionInterno(id)
+    }
+
+    fun editarComision(m: Commission, titulo: String, descEn: String) = viewModelScope.launch {
+        val cambioDesc = descEn.trim() != m.descriptionEn
+        val actual = dao.commissionNow(m.id) ?: return@launch
+        dao.updateCommission(
+            actual.copy(
+                title = titulo.trim(),
+                descriptionEn = descEn.trim(),
+                descriptionEs = if (cambioDesc) "" else actual.descriptionEs
+            )
+        )
+        if (cambioDesc && descEn.isNotBlank()) traducirDescripcionInterno(m.id)
+    }
+
+    fun borrarComision(m: Commission) = viewModelScope.launch {
+        Alarmas.cancelarRecordatorio(ctx, m.id)
+        val refs = dao.refsOfNow(m.id)
+        dao.deleteCommission(m)
+        withContext(Dispatchers.IO) {
+            refs.forEach { Archivos.borrar(it.imagePath) }
+            Ficha.archivoDe(ctx, m.id).delete()
+        }
+        aviso("Comisión eliminada")
+    }
+
+    fun setCompletada(m: Commission, hecha: Boolean) = viewModelScope.launch {
+        val actual = dao.commissionNow(m.id) ?: return@launch
+        val ahora = System.currentTimeMillis()
+        if (hecha) {
+            Alarmas.cancelarRecordatorio(ctx, m.id)
+            dao.updateCommission(
+                actual.copy(completed = true, completedAt = ahora, lastWorkedAt = ahora, stage = 3, reminderAt = null)
+            )
+            aviso("¡Comisión terminada! ✓")
+        } else {
+            dao.updateCommission(actual.copy(completed = false, completedAt = null, lastWorkedAt = ahora))
+        }
+    }
+
+    fun setEtapa(m: Commission, etapa: Int) = viewModelScope.launch {
+        val actual = dao.commissionNow(m.id) ?: return@launch
+        dao.updateCommission(
+            actual.copy(stage = etapa, completed = false, completedAt = null, lastWorkedAt = System.currentTimeMillis())
+        )
+    }
+
+    fun dibujeHoy(m: Commission) = viewModelScope.launch {
+        val actual = dao.commissionNow(m.id) ?: return@launch
+        dao.updateCommission(actual.copy(lastWorkedAt = System.currentTimeMillis()))
+        aviso("¡Anotado! El contador de días volvió a 0")
+    }
+
+    fun ponerRecordatorio(m: Commission, en: Long, nota: String) = viewModelScope.launch {
+        val actual = dao.commissionNow(m.id) ?: return@launch
+        dao.updateCommission(actual.copy(reminderAt = en, reminderNote = nota.trim()))
+        Alarmas.programarRecordatorio(ctx, m.id, en)
+        aviso("Recordatorio: " + formatoFecha(en))
+    }
+
+    fun quitarRecordatorio(m: Commission) = viewModelScope.launch {
+        Alarmas.cancelarRecordatorio(ctx, m.id)
+        dao.clearReminder(m.id)
+    }
+
+    // ---------- Traducción ----------
+    private suspend fun traducirDescripcionInterno(id: Long) {
+        val clave = "d$id"
+        traduciendo[clave] = true
+        try {
+            val m = dao.commissionNow(id) ?: return
+            val es = Traductor.traducir(m.descriptionEn)
+            dao.commissionNow(id)?.let { dao.updateCommission(it.copy(descriptionEs = es)) }
+        } catch (e: Exception) {
+            aviso("No se pudo traducir. La primera vez necesitas internet para bajar el traductor.")
+        } finally {
+            traduciendo.remove(clave)
+        }
+    }
+
+    fun traducirDescripcion(id: Long) = viewModelScope.launch { traducirDescripcionInterno(id) }
+
+    private suspend fun traducirRefInterno(id: Long) {
+        val clave = "r$id"
+        traduciendo[clave] = true
+        try {
+            val r = dao.refNow(id) ?: return
+            val es = Traductor.traducir(r.textEn)
+            dao.refNow(id)?.let { dao.updateRef(it.copy(textEs = es)) }
+        } catch (e: Exception) {
+            aviso("No se pudo traducir. La primera vez necesitas internet para bajar el traductor.")
+        } finally {
+            traduciendo.remove(clave)
+        }
+    }
+
+    fun traducirRef(r: Reference) = viewModelScope.launch { traducirRefInterno(r.id) }
+
+    fun descargarTraductor() = viewModelScope.launch {
+        traduciendo["modelo"] = true
+        try {
+            Traductor.descargar()
+            aviso("Traductor listo ✓ Ya funciona sin internet")
+        } catch (e: Exception) {
+            aviso("No se pudo descargar. Revisa tu conexión.")
+        } finally {
+            traduciendo.remove("modelo")
+        }
+    }
+
+    // ---------- Referencias ----------
+    fun agregarImagenes(comisionId: Long, uris: List<Uri>) = viewModelScope.launch {
+        val rutas = withContext(Dispatchers.IO) { uris.mapNotNull { Archivos.copiarImagen(ctx, it) } }
+        rutas.forEach { dao.insertRef(Reference(commissionId = comisionId, kind = 0, imagePath = it)) }
+        aviso(if (rutas.size == 1) "Imagen agregada" else "${rutas.size} imágenes agregadas")
+    }
+
+    fun agregarTexto(comisionId: Long, textoEn: String) = viewModelScope.launch {
+        if (textoEn.isBlank()) return@launch
+        val id = dao.insertRef(Reference(commissionId = comisionId, kind = 1, textEn = textoEn.trim()))
+        traducirRefInterno(id)
+    }
+
+    fun editarTexto(r: Reference, textoEn: String) = viewModelScope.launch {
+        dao.updateRef(r.copy(textEn = textoEn.trim(), textEs = ""))
+        traducirRefInterno(r.id)
+    }
+
+    fun borrarRef(r: Reference) = viewModelScope.launch {
+        dao.deleteRef(r)
+        if (r.kind == 0) withContext(Dispatchers.IO) { Archivos.borrar(r.imagePath) }
+    }
+
+    // ---------- Etiquetas ----------
+    fun agregarEtiqueta(comisionId: Long, nombre: String, tipo: Int) = viewModelScope.launch {
+        val limpio = nombre.trim().replace(Regex("\\s+"), " ")
+        if (limpio.isEmpty()) return@launch
+        val clave = limpio.lowercase()
+        val tag = dao.findTag(clave, tipo)
+            ?: Tag(name = limpio, nameKey = clave, type = tipo).let { it.copy(id = dao.insertTag(it)) }
+        dao.linkTag(CommissionTag(comisionId, tag.id))
+    }
+
+    fun quitarEtiqueta(comisionId: Long, tagId: Long) = viewModelScope.launch {
+        dao.unlinkTag(comisionId, tagId)
+    }
+
+    fun borrarEtiqueta(t: Tag) = viewModelScope.launch { dao.deleteTag(t) }
+
+    // ---------- Horario ----------
+    fun agregarAlHorario(dia: Int, clientId: Long) = viewModelScope.launch {
+        val pos = schedule.value.count { it.slot.dayOfWeek == dia }
+        dao.insertSlot(ScheduleSlot(dayOfWeek = dia, clientId = clientId, position = pos))
+    }
+
+    fun quitarDelHorario(s: ScheduleSlot) = viewModelScope.launch { dao.deleteSlot(s) }
+
+    // Reparte a todos los clientes con comisiones activas entre los días elegidos,
+// empezando HOY con quien lleva más días sin ser dibujado. Así nadie se queda atrás.
+    fun generarHorarioJusto(dias: List<Int>) = viewModelScope.launch {
+        val activos = dao.clientSummariesNow()
+            .filter { it.activeCount > 0 }
+            .sortedBy { it.lastWorked ?: 0L }
+        if (activos.isEmpty()) {
+            aviso("No hay clientes con comisiones activas")
+            return@launch
+        }
+        if (dias.isEmpty()) {
+            aviso("Elige al menos un día")
+            return@launch
+        }
+        val hoy = hoyNumero()
+        val ordenados = dias.sorted()
+        val orden = ordenados.filter { it >= hoy } + ordenados.filter { it < hoy }
+        val total = maxOf(activos.size, orden.size)
+        val posiciones = IntArray(8)
+        val nuevos = (0 until total).map { k ->
+            val dia = orden[k % orden.size]
+            ScheduleSlot(dayOfWeek = dia, clientId = activos[k % activos.size].client.id, position = posiciones[dia]++)
+        }
+        db.withTransaction {
+            dao.clearSchedule()
+            nuevos.forEach { dao.insertSlot(it) }
+        }
+        aviso("Horario justo listo ✨")
+    }
+
+    // ---------- Ficha / galería ----------
+    suspend fun generarFicha(m: Commission, cliente: String, refs: List<Reference>, tags: List<Tag>): File? =
+        try {
+            Ficha.generar(ctx, m, cliente, refs, tags)
+        } catch (e: Throwable) {
+            null
+        }
+
+    fun guardarEnGaleria(f: File, nombre: String) = viewModelScope.launch {
+        val ok = withContext(Dispatchers.IO) { Archivos.guardarEnGaleria(ctx, f, nombre) }
+        aviso(if (ok) "Guardada en tu galería (Imágenes › MisComisiones)" else "No se pudo guardar")
+    }
+
+    // ---------- Ajustes ----------
+    fun setDiasRojo(v: Int) {
+        ajustes.diasRojo = v
+        diasRojo = v
+    }
+
+    fun setDiario(activo: Boolean, hora: Int, minuto: Int) {
+        ajustes.diarioActivo = activo
+        ajustes.diarioHora = hora
+        ajustes.diarioMinuto = minuto
+        Alarmas.programarDiario(ctx)
+    }
+
+    fun probarNotificacion() {
+        if (!Alarmas.puedeNotificar(ctx)) {
+            aviso("Primero permite las notificaciones")
+            return
+        }
+        Alarmas.notificar(
+            ctx, 1, Alarmas.CANAL_RECORDATORIOS,
+            "🎨 ¡Funciona!", "Así te llegarán los recordatorios de tus comisiones.",
+            Alarmas.abrirApp(ctx, null)
+        )
+    }
+
+    fun probarResumen() = viewModelScope.launch {
+        withContext(Dispatchers.IO) { Alarmas.enviarResumen(ctx) }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/Componentes.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+package com.comisiones.app.ui
+
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
+import com.comisiones.app.data.Etapas
+import com.comisiones.app.data.TagCount
+import com.comisiones.app.data.TipoEtiqueta
+import com.comisiones.app.util.diasDesde
+import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
+
+// ---------------- Tema ----------------
+
+val Verde = Color(0xFF5BD68A)
+val Rojo = Color(0xFFFF4D5E)
+
+@Composable
+fun TemaComisiones(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            primary = Color(0xFFFF8FC7),
+            onPrimary = Color(0xFF3A0A24),
+            primaryContainer = Color(0xFF5A1F44),
+            onPrimaryContainer = Color(0xFFFFD8EA),
+            secondary = Color(0xFFB9A6FF),
+            onSecondary = Color(0xFF241552),
+            secondaryContainer = Color(0xFF3B2F66),
+            onSecondaryContainer = Color(0xFFE6DEFF),
+            tertiary = Color(0xFFFFC46B),
+            onTertiary = Color(0xFF3D2600),
+            background = Color(0xFF17131F),
+            onBackground = Color(0xFFEDE6F3),
+            surface = Color(0xFF17131F),
+            onSurface = Color(0xFFEDE6F3),
+            surfaceVariant = Color(0xFF2A2433),
+            onSurfaceVariant = Color(0xFFB8AEC4),
+            surfaceContainerLowest = Color(0xFF120F18),
+            surfaceContainerLow = Color(0xFF1C1725),
+            surfaceContainer = Color(0xFF201A29),
+            surfaceContainerHigh = Color(0xFF241D2E),
+            surfaceContainerHighest = Color(0xFF2A2234),
+            outline = Color(0xFF6E6479),
+            outlineVariant = Color(0xFF3E3648)
+        ),
+        content = content
+    )
+}
+
+// ---------------- Estructura de pantalla ----------------
+
+@Composable
+fun Pantalla(
+    titulo: String,
+    onBack: (() -> Unit)? = null,
+    acciones: @Composable RowScope.() -> Unit = {},
+    fab: @Composable () -> Unit = {},
+    content: @Composable (PaddingValues) -> Unit
+) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(titulo, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Atrás")
+                        }
+                    }
+                },
+                actions = acciones,
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
+            )
+        },
+        floatingActionButton = fab,
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        content = content
+    )
+}
+
+@Composable
+fun Seccion(
+    titulo: String,
+    accion: @Composable RowScope.() -> Unit = {},
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    titulo.uppercase(),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                accion()
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+fun Vacio(texto: String, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+        Text(
+            texto,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyLarge
+        )
+    }
+}
+
+@Composable
+fun Avatar(nombre: String, tam: Int = 42) {
+    val colores = listOf(0xFFFF8FC7, 0xFFB9A6FF, 0xFFFFC46B, 0xFF7FD8FF, 0xFF5BD68A, 0xFFFF9E7A)
+    val c = Color(colores[(nombre.hashCode() and 0x7fffffff) % colores.size])
+    Box(
+        Modifier.size(tam.dp).clip(CircleShape).background(c.copy(alpha = 0.22f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            nombre.trim().take(1).uppercase().ifEmpty { "?" },
+            color = c,
+            fontWeight = FontWeight.Bold,
+            fontSize = (tam * 0.42f).sp
+        )
+    }
+}
+
+// ---------------- Contador de días (blanco → rojo) ----------------
+
+fun colorDias(dias: Int, rojo: Int): Color {
+    val f = (dias.toFloat() / rojo.coerceAtLeast(1)).coerceIn(0f, 1f)
+    return lerp(Color.White, Rojo, f)
+}
+
+@Composable
+fun DiasBadge(ultimo: Long?, terminada: Boolean, diasRojo: Int, modifier: Modifier = Modifier) {
+    if (terminada) {
+        Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Verde, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Lista", color = Verde, style = MaterialTheme.typography.labelLarge)
+        }
+        return
+    }
+    if (ultimo == null) {
+        Text("—", modifier = modifier, color = MaterialTheme.colorScheme.outline)
+        return
+    }
+    val d = diasDesde(ultimo)
+    val c = colorDias(d, diasRojo)
+    Column(
+        modifier
+            .border(1.5.dp, c.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("$d", color = c, fontWeight = FontWeight.Bold, fontSize = 20.sp, lineHeight = 22.sp)
+        Text(if (d == 1) "día" else "días", color = c.copy(alpha = 0.85f), fontSize = 11.sp, lineHeight = 12.sp)
+    }
+}
+
+// ---------------- Etapas: Boceto → Lineart → Color base → Coloreado final ----------------
+
+@Composable
+fun EtapasSelector(etapa: Int, terminada: Boolean, onElegir: ((Int) -> Unit)?, compacto: Boolean = false) {
+    Row(Modifier.fillMaxWidth()) {
+        Etapas.nombres.forEachIndexed { i, nombre ->
+            val hecho = terminada || i < etapa
+            val actual = !terminada && i == etapa
+            val color = when {
+                hecho -> Verde
+                actual -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.outline
+            }
+            val tam = if (compacto) 24.dp else 32.dp
+            Column(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .then(if (onElegir != null) Modifier.clickable { onElegir(i) } else Modifier)
+                    .padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    Modifier
+                        .size(tam)
+                        .clip(CircleShape)
+                        .background(if (hecho || actual) color else Color.Transparent)
+                        .border(2.dp, color, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (hecho) {
+                        Icon(Icons.Default.Check, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                    } else {
+                        Text(
+                            "${i + 1}",
+                            color = if (actual) Color.Black else color,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text(
+                    nombre,
+                    fontSize = if (compacto) 10.sp else 12.sp,
+                    lineHeight = 13.sp,
+                    color = if (actual) color else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (actual) FontWeight.Bold else FontWeight.Normal,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+// ---------------- Diálogos ----------------
+
+data class Campo(
+    val etiqueta: String,
+    val inicial: String = "",
+    val multilinea: Boolean = false,
+    val obligatorio: Boolean = false
+)
+
+@Composable
+fun DialogoCampos(
+    titulo: String,
+    campos: List<Campo>,
+    confirmar: String = "Guardar",
+    onDismiss: () -> Unit,
+    onConfirm: (List<String>) -> Unit
+) {
+    val valores = remember { campos.map { mutableStateOf(it.inicial) } }
+    val valido = campos.indices.all { !campos[it].obligatorio || valores[it].value.isNotBlank() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(titulo) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                campos.forEachIndexed { i, campo ->
+                    OutlinedTextField(
+                        value = valores[i].value,
+                        onValueChange = { valores[i].value = it },
+                        label = { Text(campo.etiqueta) },
+                        singleLine = !campo.multilinea,
+                        minLines = if (campo.multilinea) 3 else 1,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valido, onClick = { onConfirm(valores.map { it.value }) }) { Text(confirmar) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+@Composable
+fun DialogoConfirmar(titulo: String, texto: String, boton: String = "Eliminar", onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(titulo) },
+        text = { Text(texto) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(boton, color = Rojo) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+@Composable
+fun DialogoEtiqueta(existentes: List<TagCount>, onDismiss: () -> Unit, onAgregar: (String, Int) -> Unit) {
+    var tipo by remember { mutableIntStateOf(TipoEtiqueta.PERSONAJE) }
+    var texto by remember { mutableStateOf("") }
+    val deTipo = existentes.filter { it.tag.type == tipo }
+    val sugerencias = if (texto.isBlank()) deTipo.take(8)
+    else deTipo.filter { it.tag.name.contains(texto.trim(), ignoreCase = true) }.take(6)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Agregar etiqueta") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TipoEtiqueta.singular.forEachIndexed { i, n ->
+                        FilterChip(selected = tipo == i, onClick = { tipo = i }, label = { Text(n) })
+                    }
+                }
+                OutlinedTextField(
+                    value = texto,
+                    onValueChange = { texto = it },
+                    label = {
+                        Text(
+                            when (tipo) {
+                                TipoEtiqueta.PERSONAJE -> "Personaje (ej. Hatsune Miku)"
+                                TipoEtiqueta.POSE -> "Pose (ej. sentada, de espaldas)"
+                                TipoEtiqueta.OC -> "Nombre del OC"
+                                else -> "Etiqueta"
+                            }
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (sugerencias.isNotEmpty()) {
+                    Text(
+                        if (texto.isBlank()) "Toca para usar una que ya tienes:" else "¿Es alguna de estas?",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        sugerencias.forEach { s ->
+                            SuggestionChip(
+                                onClick = { onAgregar(s.tag.name, tipo) },
+                                label = { Text("${s.tag.name} ×${s.uses}") }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = texto.isNotBlank(), onClick = { onAgregar(texto, tipo) }) { Text("Agregar") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
+    )
+}
+
+@Composable
+fun VisorImagen(ruta: String, onDismiss: () -> Unit, onBorrar: (() -> Unit)? = null) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        var escala by remember { mutableFloatStateOf(1f) }
+        var desplazamiento by remember { mutableStateOf(Offset.Zero) }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            AsyncImage(
+                model = File(ruta),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            escala = (escala * zoom).coerceIn(1f, 5f)
+                            desplazamiento = if (escala == 1f) Offset.Zero else desplazamiento + pan
+                        }
+                    }
+                    .graphicsLayer {
+                        scaleX = escala
+                        scaleY = escala
+                        translationX = desplazamiento.x
+                        translationY = desplazamiento.y
+                    }
+            )
+            Row(Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)) {
+                if (onBorrar != null) {
+                    IconButton(onClick = onBorrar) { Icon(Icons.Default.Delete, contentDescription = "Borrar", tint = Color.White) }
+                }
+                IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = Color.White) }
+            }
+        }
+    }
+}
+
+@Composable
+fun TarjetaChica(content: @Composable ColumnScope.() -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(12.dp), content = content)
+    }
+}
+
+// ---------------- Selector de fecha y hora ----------------
+
+fun elegirFechaHora(ctx: Context, inicial: Long?, onElegido: (Long) -> Unit) {
+    val z = ZoneId.systemDefault()
+    val base = inicial?.let { Instant.ofEpochMilli(it).atZone(z) }
+        ?: ZonedDateTime.now(z).plusHours(1).withMinute(0)
+    DatePickerDialog(
+        ctx,
+        { _, y, mes, dia ->
+            TimePickerDialog(
+                ctx,
+                { _, h, min ->
+                    onElegido(ZonedDateTime.of(y, mes + 1, dia, h, min, 0, 0, z).toInstant().toEpochMilli())
+                },
+                base.hour, base.minute, true
+            ).show()
+        },
+        base.year, base.monthValue - 1, base.dayOfMonth
+    ).show()
+}
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Ajustes.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package com.comisiones.app.ui.screens
+
+import android.Manifest
+import android.app.TimePickerDialog
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.navigation.NavController
+import com.comisiones.app.notif.Alarmas
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.DiasBadge
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.ui.Seccion
+import com.comisiones.app.ui.Verde
+import kotlin.math.roundToInt
+
+@Composable
+fun AjustesScreen(vm: AppViewModel, nav: NavController) {
+    val ctx = LocalContext.current
+    var notifOk by remember { mutableStateOf(Alarmas.puedeNotificar(ctx)) }
+    val permiso = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        notifOk = ok
+        if (!ok) abrirAjustesApp(ctx)
+    }
+    var diarioActivo by remember { mutableStateOf(vm.ajustes.diarioActivo) }
+    var hora by remember { mutableIntStateOf(vm.ajustes.diarioHora) }
+    var minuto by remember { mutableIntStateOf(vm.ajustes.diarioMinuto) }
+
+    Pantalla("Ajustes", onBack = { nav.popBackStack() }) { pad ->
+        Column(
+            Modifier
+                .padding(pad)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Seccion("Permisos (importante en Xiaomi)") {
+                Text(
+                    "Para que los recordatorios te lleguen aunque cierres la app, haz estos 3 pasos una sola vez:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = {
+                            if (Build.VERSION.SDK_INT >= 33) permiso.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            else abrirAjustesApp(ctx)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("1. Permitir notificaciones") }
+                    if (notifOk) {
+                        Spacer(Modifier.padding(4.dp))
+                        Icon(Icons.Default.CheckCircle, contentDescription = "Listo", tint = Verde)
+                    }
+                }
+                Button(onClick = { abrirAutoinicioXiaomi(ctx) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("2. Activar «Inicio automático»")
+                }
+                Button(onClick = { abrirBateria(ctx) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("3. Batería: «Sin restricciones»")
+                }
+                Text(
+                    "En el paso 3, si te abre la info de la app, entra a «Ahorro de batería» y elige «Sin restricciones».",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(onClick = { vm.probarNotificacion() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Probar una notificación")
+                }
+            }
+
+            Seccion("Aviso diario") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Cada día te aviso a quién toca dibujar y qué comisiones van atrasadas",
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(checked = diarioActivo, onCheckedChange = {
+                        diarioActivo = it
+                        vm.setDiario(it, hora, minuto)
+                    })
+                }
+                OutlinedButton(
+                    enabled = diarioActivo,
+                    onClick = {
+                        TimePickerDialog(ctx, { _, h, mi ->
+                            hora = h
+                            minuto = mi
+                            vm.setDiario(diarioActivo, h, mi)
+                        }, hora, minuto, true).show()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Hora del aviso: %02d:%02d".format(hora, minuto)) }
+                OutlinedButton(onClick = { vm.probarResumen() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Ver el aviso de hoy ahora")
+                }
+            }
+
+            Seccion("Contador de días") {
+                Text("Los números se ponen totalmente rojos a los ${vm.diasRojo} días sin dibujar.")
+                Slider(
+                    value = vm.diasRojo.toFloat(),
+                    onValueChange = { vm.setDiasRojo(it.roundToInt()) },
+                    valueRange = 2f..30f,
+                    steps = 27
+                )
+                Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                    val dia = 24L * 60 * 60 * 1000
+                    val ahora = System.currentTimeMillis()
+                    listOf(0, vm.diasRojo / 2, vm.diasRojo).forEach { d ->
+                        DiasBadge(ahora - d * dia, false, vm.diasRojo)
+                    }
+                }
+            }
+
+            Seccion("Traductor inglés → español") {
+                Text(
+                    "La traducción funciona sin internet después de descargar el paquete de idioma (unos 30 MB) una sola vez.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                val bajando = vm.traduciendo["modelo"] == true
+                Button(onClick = { vm.descargarTraductor() }, enabled = !bajando, modifier = Modifier.fillMaxWidth()) {
+                    if (bajando) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.padding(4.dp))
+                        Text("Descargando…")
+                    } else {
+                        Text("Descargar traductor ahora")
+                    }
+                }
+            }
+
+            Text(
+                "Mis Comisiones · tus datos se guardan solo en este teléfono.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+private fun abrirAjustesApp(ctx: Context) {
+    val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + ctx.packageName))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { ctx.startActivity(i) }
+}
+
+private fun abrirAutoinicioXiaomi(ctx: Context) {
+    val intentos = listOf(
+        ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+        ComponentName("com.miui.securitycenter", "com.miui.powercenter.PowerSettings")
+    )
+    for (c in intentos) {
+        val ok = runCatching {
+            ctx.startActivity(Intent().setComponent(c).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.isSuccess
+        if (ok) return
+    }
+    abrirAjustesApp(ctx)
+}
+
+private fun abrirBateria(ctx: Context) {
+    val ok = runCatching {
+        ctx.startActivity(
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }.isSuccess
+    if (!ok) abrirAjustesApp(ctx)
+}
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Clientes.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package com.comisiones.app.ui.screens
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import com.comisiones.app.data.Client
+import com.comisiones.app.data.ClientSummary
+import com.comisiones.app.data.Commission
+import com.comisiones.app.data.Etapas
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.Avatar
+import com.comisiones.app.ui.Campo
+import com.comisiones.app.ui.DiasBadge
+import com.comisiones.app.ui.DialogoCampos
+import com.comisiones.app.ui.DialogoConfirmar
+import com.comisiones.app.ui.EtapasSelector
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.ui.Vacio
+import com.comisiones.app.util.diasDesde
+import com.comisiones.app.util.formatoFecha
+
+// ======================= LISTA DE CLIENTES =======================
+
+@Composable
+fun ClientesScreen(vm: AppViewModel, nav: NavController) {
+    val clientes by vm.clients.collectAsState()
+    var busqueda by rememberSaveable { mutableStateOf("") }
+    var ordenDias by rememberSaveable { mutableStateOf(true) }
+    var nuevo by remember { mutableStateOf(false) }
+    var editar by remember { mutableStateOf<Client?>(null) }
+    var borrar by remember { mutableStateOf<Client?>(null) }
+
+    val lista = remember(clientes, busqueda, ordenDias) {
+        val f = clientes.filter { busqueda.isBlank() || it.client.name.contains(busqueda.trim(), ignoreCase = true) }
+        if (ordenDias) {
+            f.sortedWith(
+                compareByDescending<ClientSummary> { it.activeCount > 0 }
+                    .thenByDescending { diasDesde(it.lastWorked) }
+            )
+        } else f
+    }
+
+    Pantalla(
+        "Mis clientes",
+        acciones = {
+            IconButton(onClick = { nav.navigate("ajustes") }) { Icon(Icons.Default.Settings, contentDescription = "Ajustes") }
+        },
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { nuevo = true },
+                icon = { Icon(Icons.Default.PersonAdd, contentDescription = null) },
+                text = { Text("Cliente") }
+            )
+        }
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            OutlinedTextField(
+                value = busqueda,
+                onValueChange = { busqueda = it },
+                placeholder = { Text("Buscar cliente…") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                singleLine = true,
+                shape = RoundedCornerShape(28.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            )
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item { FilterChip(selected = ordenDias, onClick = { ordenDias = true }, label = { Text("Más días sin dibujar") }) }
+                item { FilterChip(selected = !ordenDias, onClick = { ordenDias = false }, label = { Text("A-Z") }) }
+            }
+            if (lista.isEmpty()) {
+                Vacio(
+                    if (clientes.isEmpty()) "Aún no tienes clientes.\nToca «+ Cliente» para agregar el primero."
+                    else "Ningún cliente coincide con la búsqueda."
+                )
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(lista, key = { it.client.id }) { cs ->
+                        FilaCliente(cs, vm, nav, onEditar = { editar = cs.client }, onBorrar = { borrar = cs.client })
+                    }
+                }
+            }
+        }
+    }
+
+    if (nuevo) {
+        DialogoCampos(
+            "Nuevo cliente",
+            listOf(
+                Campo("Nombre", obligatorio = true),
+                Campo("Contacto (Discord, Twitter, correo…)"),
+                Campo("Notas", multilinea = true)
+            ),
+            confirmar = "Agregar",
+            onDismiss = { nuevo = false }
+        ) { v ->
+            nuevo = false
+            vm.guardarCliente(Client(name = v[0].trim(), contact = v[1].trim(), notes = v[2].trim()))
+        }
+    }
+    editar?.let { c -> DialogoEditarCliente(c, vm) { editar = null } }
+    borrar?.let { c ->
+        DialogoConfirmar(
+            "¿Eliminar a ${c.name}?",
+            "Se borrarán también todas sus comisiones, referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = null }
+        ) {
+            borrar = null
+            vm.borrarCliente(c)
+        }
+    }
+}
+
+@Composable
+private fun DialogoEditarCliente(c: Client, vm: AppViewModel, cerrar: () -> Unit) {
+    DialogoCampos(
+        "Editar cliente",
+        listOf(
+            Campo("Nombre", c.name, obligatorio = true),
+            Campo("Contacto", c.contact),
+            Campo("Notas", c.notes, multilinea = true)
+        ),
+        onDismiss = cerrar
+    ) { v ->
+        cerrar()
+        vm.guardarCliente(c.copy(name = v[0].trim(), contact = v[1].trim(), notes = v[2].trim()))
+    }
+}
+
+@Composable
+private fun FilaCliente(
+    cs: ClientSummary,
+    vm: AppViewModel,
+    nav: NavController,
+    onEditar: () -> Unit,
+    onBorrar: () -> Unit
+) {
+    var expandido by rememberSaveable(cs.client.id) { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    Card(onClick = { nav.navigate("cliente/${cs.client.id}") }, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Avatar(cs.client.name)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(cs.client.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "${cs.activeCount} activa(s) · ${cs.totalCount} en total",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            DiasBadge(
+                ultimo = if (cs.activeCount > 0) cs.lastWorked else null,
+                terminada = cs.totalCount > 0 && cs.activeCount == 0,
+                diasRojo = vm.diasRojo
+            )
+            IconButton(onClick = { expandido = !expandido }) {
+                Icon(if (expandido) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = "Desglosar")
+            }
+            androidx.compose.foundation.layout.Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Más") }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Editar") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = { menu = false; onEditar() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Eliminar") },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                        onClick = { menu = false; onBorrar() }
+                    )
+                }
+            }
+        }
+        AnimatedVisibility(visible = expandido) {
+            val flujo = remember(cs.client.id) { vm.commissionsOf(cs.client.id) }
+            val comisiones by flujo.collectAsState(initial = emptyList())
+            Column(Modifier.padding(start = 8.dp, end = 12.dp, bottom = 10.dp)) {
+                HorizontalDivider(Modifier.padding(bottom = 4.dp, start = 6.dp))
+                if (comisiones.isEmpty()) {
+                    Text(
+                        "Sin comisiones todavía",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+                comisiones.forEach { m ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { nav.navigate("comision/${m.id}") }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = m.completed, onCheckedChange = { vm.setCompletada(m, it) })
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                m.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textDecoration = if (m.completed) TextDecoration.LineThrough else null
+                            )
+                            Text(
+                                if (m.completed) "Terminada" else "Vas en: ${Etapas.nombres.getOrElse(m.stage) { "" }}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DiasBadge(m.lastWorkedAt, m.completed, vm.diasRojo)
+                    }
+                }
+                TextButton(onClick = { nav.navigate("cliente/${cs.client.id}") }, modifier = Modifier.align(Alignment.End)) {
+                    Text("Abrir cliente")
+                }
+            }
+        }
+    }
+}
+
+// ======================= DETALLE DE UN CLIENTE =======================
+
+@Composable
+fun ClienteScreen(vm: AppViewModel, nav: NavController, id: Long) {
+    val cliente by remember(id) { vm.client(id) }.collectAsState(initial = null)
+    val comisiones by remember(id) { vm.commissionsOf(id) }.collectAsState(initial = emptyList())
+    var filtro by rememberSaveable { mutableIntStateOf(0) }
+    var nueva by remember { mutableStateOf(false) }
+    var editar by remember { mutableStateOf(false) }
+    var borrar by remember { mutableStateOf(false) }
+    val c = cliente
+
+    val activas = comisiones.count { !it.completed }
+    val terminadas = comisiones.size - activas
+    val lista = comisiones.filter {
+        when (filtro) {
+            0 -> !it.completed
+            1 -> it.completed
+            else -> true
+        }
+    }
+
+    Pantalla(
+        c?.name ?: "Cliente",
+        onBack = { nav.popBackStack() },
+        acciones = {
+            if (c != null) {
+                IconButton(onClick = { editar = true }) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+                IconButton(onClick = { borrar = true }) { Icon(Icons.Default.Delete, contentDescription = "Eliminar") }
+            }
+        },
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { nueva = true },
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                text = { Text("Comisión") }
+            )
+        }
+    ) { pad ->
+        LazyColumn(
+            Modifier.padding(pad).fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (c != null && (c.contact.isNotBlank() || c.notes.isNotBlank())) {
+                item {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (c.contact.isNotBlank()) Text("Contacto: ${c.contact}", style = MaterialTheme.typography.bodyMedium)
+                            if (c.notes.isNotBlank()) Text(c.notes, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = filtro == 0, onClick = { filtro = 0 }, label = { Text("Activas ($activas)") })
+                    FilterChip(selected = filtro == 1, onClick = { filtro = 1 }, label = { Text("Listas ($terminadas)") })
+                    FilterChip(selected = filtro == 2, onClick = { filtro = 2 }, label = { Text("Todas") })
+                }
+            }
+            if (lista.isEmpty()) {
+                item {
+                    Vacio(if (comisiones.isEmpty()) "Este cliente no tiene comisiones.\nToca «+ Comisión»." else "No hay comisiones aquí.")
+                }
+            }
+            items(lista, key = { it.id }) { m ->
+                TarjetaComision(m, vm) { nav.navigate("comision/${m.id}") }
+            }
+        }
+    }
+
+    if (nueva) {
+        DialogoCampos(
+            "Nueva comisión",
+            listOf(
+                Campo("Título (ej. Miku en un parque)", obligatorio = true),
+                Campo("Lo que pidió el cliente (pégalo en inglés)", multilinea = true)
+            ),
+            confirmar = "Crear",
+            onDismiss = { nueva = false }
+        ) { v ->
+            nueva = false
+            vm.crearComision(id, v[0], v[1]) { nuevoId -> nav.navigate("comision/$nuevoId") }
+        }
+    }
+    if (editar && c != null) DialogoEditarCliente(c, vm) { editar = false }
+    if (borrar && c != null) {
+        DialogoConfirmar(
+            "¿Eliminar a ${c.name}?",
+            "Se borrarán también todas sus comisiones, referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = false }
+        ) {
+            borrar = false
+            vm.borrarCliente(c)
+            nav.popBackStack()
+        }
+    }
+}
+
+@Composable
+fun TarjetaComision(m: Commission, vm: AppViewModel, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(start = 4.dp, end = 12.dp, top = 8.dp, bottom = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = m.completed, onCheckedChange = { vm.setCompletada(m, it) })
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        m.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textDecoration = if (m.completed) TextDecoration.LineThrough else null
+                    )
+                    val rec = m.reminderAt
+                    if (rec != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Alarm, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(formatoFecha(rec), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                        }
+                    }
+                }
+                DiasBadge(m.lastWorkedAt, m.completed, vm.diasRojo)
+            }
+            Spacer(Modifier.size(6.dp))
+            Row(Modifier.padding(start = 8.dp)) {
+                EtapasSelector(m.stage, m.completed, onElegir = { vm.setEtapa(m, it) }, compacto = true)
+            }
+            if (!m.completed) {
+                TextButton(onClick = { vm.dibujeHoy(m) }, modifier = Modifier.align(Alignment.End)) {
+                    Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Dibujé hoy")
+                }
+            }
+        }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Comision.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+package com.comisiones.app.ui.screens
+
+import android.Manifest
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.NoteAdd
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import coil.compose.AsyncImage
+import com.comisiones.app.data.Commission
+import com.comisiones.app.data.Reference
+import com.comisiones.app.data.TipoEtiqueta
+import com.comisiones.app.notif.Alarmas
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.Campo
+import com.comisiones.app.ui.DiasBadge
+import com.comisiones.app.ui.DialogoCampos
+import com.comisiones.app.ui.DialogoConfirmar
+import com.comisiones.app.ui.DialogoEtiqueta
+import com.comisiones.app.ui.EtapasSelector
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.ui.Seccion
+import com.comisiones.app.ui.TarjetaChica
+import com.comisiones.app.ui.VisorImagen
+import com.comisiones.app.ui.elegirFechaHora
+import com.comisiones.app.util.formatoFecha
+import java.io.File
+
+@Composable
+fun ComisionScreen(vm: AppViewModel, nav: NavController, id: Long) {
+    val ctx = LocalContext.current
+    val comision by remember(id) { vm.commission(id) }.collectAsState(initial = null)
+    val refs by remember(id) { vm.refsOf(id) }.collectAsState(initial = emptyList())
+    val tags by remember(id) { vm.tagsOf(id) }.collectAsState(initial = emptyList())
+    val conteos by vm.tagCounts.collectAsState()
+
+    val m = comision
+    if (m == null) {
+        Pantalla("Comisión", onBack = { nav.popBackStack() }) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        }
+        return
+    }
+    val cliente by remember(m.clientId) { vm.client(m.clientId) }.collectAsState(initial = null)
+
+    var editar by remember { mutableStateOf(false) }
+    var borrar by remember { mutableStateOf(false) }
+    var nuevoTexto by remember { mutableStateOf(false) }
+    var editarRef by remember { mutableStateOf<Reference?>(null) }
+    var nuevaEtiqueta by remember { mutableStateOf(false) }
+    var visor by remember { mutableStateOf<Reference?>(null) }
+    var horaElegida by remember { mutableStateOf<Long?>(null) }
+
+    val elegirImagenes = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+        if (uris.isNotEmpty()) vm.agregarImagenes(id, uris)
+    }
+    val permiso = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    fun abrirSelector() = elegirImagenes.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+
+    Pantalla(
+        m.title,
+        onBack = { nav.popBackStack() },
+        acciones = {
+            IconButton(onClick = { editar = true }) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+            IconButton(onClick = { borrar = true }) { Icon(Icons.Default.Delete, contentDescription = "Eliminar") }
+        }
+    ) { pad ->
+        Column(
+            Modifier
+                .padding(pad)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            AssistChip(
+                onClick = { nav.navigate("cliente/${m.clientId}") },
+                label = { Text(cliente?.name ?: "Cliente") },
+                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+
+            // ---------- Progreso ----------
+            Seccion("Progreso") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = m.completed, onCheckedChange = { vm.setCompletada(m, it) })
+                    Text(
+                        if (m.completed) "¡Comisión terminada!" else "Marcar como terminada",
+                        fontWeight = if (m.completed) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f)
+                    )
+                    DiasBadge(m.lastWorkedAt, m.completed, vm.diasRojo)
+                }
+                Text(
+                    "Toca la etapa en la que vas:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                EtapasSelector(m.stage, m.completed, onElegir = { vm.setEtapa(m, it) })
+                if (!m.completed) {
+                    OutlinedButton(onClick = { vm.dibujeHoy(m) }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Dibujé hoy (contador a 0)")
+                    }
+                }
+            }
+
+            // ---------- Recordatorio ----------
+            Seccion("Recordatorio") {
+                val rec = m.reminderAt
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Alarm, contentDescription = null,
+                        tint = if (rec != null) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(if (rec != null) formatoFecha(rec) else "Sin recordatorio")
+                        if (rec != null && m.reminderNote.isNotBlank()) {
+                            Text(m.reminderNote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        if (Build.VERSION.SDK_INT >= 33 && !Alarmas.puedeNotificar(ctx)) {
+                            permiso.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        elegirFechaHora(ctx, rec) { t ->
+                            if (t <= System.currentTimeMillis()) {
+                                Toast.makeText(ctx, "Esa hora ya pasó, elige otra", Toast.LENGTH_SHORT).show()
+                            } else {
+                                horaElegida = t
+                            }
+                        }
+                    }) { Text(if (rec == null) "Poner recordatorio" else "Cambiar") }
+                    if (rec != null) TextButton(onClick = { vm.quitarRecordatorio(m) }) { Text("Quitar") }
+                }
+            }
+
+            // ---------- Pedido ----------
+            Seccion("Lo que pidió", accion = {
+                IconButton(onClick = { editar = true }) { Icon(Icons.Default.Edit, contentDescription = "Editar pedido") }
+            }) {
+                Text("Original (inglés)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectionContainer {
+                    Text(m.descriptionEn.ifBlank { "(vacío — toca el lápiz para pegar lo que te pidió)" })
+                }
+                HorizontalDivider()
+                val traduciendo = vm.traduciendo["d${m.id}"] == true
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Español",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        enabled = m.descriptionEn.isNotBlank() && !traduciendo,
+                        onClick = { vm.traducirDescripcion(m.id) }
+                    ) {
+                        if (traduciendo) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        else Icon(Icons.Default.Translate, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (traduciendo) "Traduciendo…" else "Traducir")
+                    }
+                }
+                SelectionContainer {
+                    Text(
+                        m.descriptionEs.ifBlank { if (m.descriptionEn.isBlank()) "—" else "(sin traducir)" },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+
+            // ---------- Etiquetas ----------
+            Seccion("Personajes, poses y etiquetas", accion = {
+                TextButton(onClick = { nuevaEtiqueta = true }) { Text("+ Agregar") }
+            }) {
+                if (tags.isEmpty()) {
+                    Text(
+                        "Agrega el personaje (ej. Hatsune Miku), la pose, el OC… así sabrás qué te piden más.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TipoEtiqueta.nombres.forEachIndexed { tipo, nombre ->
+                    val deTipo = tags.filter { it.type == tipo }
+                    if (deTipo.isNotEmpty()) {
+                        Text(nombre, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            deTipo.forEach { t ->
+                                val usos = conteos.firstOrNull { it.tag.id == t.id }?.uses ?: 1
+                                InputChip(
+                                    selected = false,
+                                    onClick = { nav.navigate("etiqueta/${t.id}") },
+                                    label = { Text("${t.name}  ×$usos") },
+                                    trailingIcon = {
+                                        Icon(
+                                            Icons.Default.Close, contentDescription = "Quitar",
+                                            modifier = Modifier.size(18.dp).clickable { vm.quitarEtiqueta(id, t.id) }
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- Referencias ----------
+            val imagenes = refs.filter { it.kind == 0 }
+            val textos = refs.filter { it.kind == 1 }
+            Seccion("Referencias", accion = {
+                IconButton(onClick = { abrirSelector() }) { Icon(Icons.Default.AddPhotoAlternate, contentDescription = "Agregar imágenes") }
+                IconButton(onClick = { nuevoTexto = true }) { Icon(Icons.Default.NoteAdd, contentDescription = "Agregar texto") }
+            }) {
+                if (refs.isEmpty()) {
+                    Text(
+                        "Sube las imágenes que te mandó el cliente o pega sus mensajes (se traducen solos).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (imagenes.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(imagenes, key = { it.id }) { r ->
+                            AsyncImage(
+                                model = File(r.imagePath),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 120.dp, height = 150.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { visor = r }
+                            )
+                        }
+                    }
+                }
+                textos.forEach { r ->
+                    TarjetaTexto(
+                        r,
+                        traduciendo = vm.traduciendo["r${r.id}"] == true,
+                        onTraducir = { vm.traducirRef(r) },
+                        onEditar = { editarRef = r },
+                        onBorrar = { vm.borrarRef(r) }
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { abrirSelector() }) { Text("+ Imágenes") }
+                    OutlinedButton(onClick = { nuevoTexto = true }) { Text("+ Texto") }
+                }
+            }
+
+            Button(onClick = { nav.navigate("ficha/$id") }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Icon(Icons.Default.Image, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Ver ficha en español (galería)")
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    // ---------- Diálogos ----------
+    if (editar) {
+        DialogoCampos(
+            "Editar comisión",
+            listOf(
+                Campo("Título", m.title, obligatorio = true),
+                Campo("Lo que pidió (en inglés)", m.descriptionEn, multilinea = true)
+            ),
+            onDismiss = { editar = false }
+        ) { v ->
+            editar = false
+            vm.editarComision(m, v[0], v[1])
+        }
+    }
+    if (borrar) {
+        DialogoConfirmar(
+            "¿Eliminar «${m.title}»?",
+            "Se borrarán sus referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = false }
+        ) {
+            borrar = false
+            vm.borrarComision(m)
+            nav.popBackStack()
+        }
+    }
+    if (nuevoTexto) {
+        DialogoCampos(
+            "Texto de referencia",
+            listOf(Campo("Pega lo que escribió el cliente (inglés)", multilinea = true, obligatorio = true)),
+            confirmar = "Agregar y traducir",
+            onDismiss = { nuevoTexto = false }
+        ) { v ->
+            nuevoTexto = false
+            vm.agregarTexto(id, v[0])
+        }
+    }
+    editarRef?.let { r ->
+        DialogoCampos(
+            "Editar texto",
+            listOf(Campo("Texto (inglés)", r.textEn, multilinea = true, obligatorio = true)),
+            onDismiss = { editarRef = null }
+        ) { v ->
+            editarRef = null
+            vm.editarTexto(r, v[0])
+        }
+    }
+    if (nuevaEtiqueta) {
+        DialogoEtiqueta(conteos, onDismiss = { nuevaEtiqueta = false }) { nombre, tipo ->
+            vm.agregarEtiqueta(id, nombre, tipo)
+            nuevaEtiqueta = false
+        }
+    }
+    visor?.let { r ->
+        VisorImagen(r.imagePath, onDismiss = { visor = null }, onBorrar = { visor = null; vm.borrarRef(r) })
+    }
+    horaElegida?.let { t ->
+        DialogoCampos(
+            "Recordatorio: ${formatoFecha(t)}",
+            listOf(Campo("Nota (opcional, ej. «enviar boceto»)", m.reminderNote)),
+            confirmar = "Guardar",
+            onDismiss = { horaElegida = null }
+        ) { v ->
+            horaElegida = null
+            vm.ponerRecordatorio(m, t, v[0])
+        }
+    }
+}
+
+@Composable
+private fun TarjetaTexto(
+    r: Reference,
+    traduciendo: Boolean,
+    onTraducir: () -> Unit,
+    onEditar: () -> Unit,
+    onBorrar: () -> Unit
+) {
+    var confirmar by remember { mutableStateOf(false) }
+    TarjetaChica {
+        Text("Inglés", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectionContainer { Text(r.textEn, style = MaterialTheme.typography.bodyMedium) }
+        Spacer(Modifier.height(6.dp))
+        Text("Español", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+        SelectionContainer {
+            Text(
+                if (traduciendo) "Traduciendo…" else r.textEs.ifBlank { "(sin traducir)" },
+                style = MaterialTheme.typography.bodyLarge
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            IconButton(onClick = onTraducir, enabled = !traduciendo) { Icon(Icons.Default.Translate, contentDescription = "Traducir") }
+            IconButton(onClick = onEditar) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+            IconButton(onClick = { confirmar = true }) { Icon(Icons.Default.Delete, contentDescription = "Borrar") }
+        }
+    }
+    if (confirmar) {
+        DialogoConfirmar("¿Borrar este texto?", r.textEn.take(120), onDismiss = { confirmar = false }) {
+            confirmar = false
+            onBorrar()
+        }
+    }
+}
+
+@Suppress("unused")
+private fun Commission.etiquetaEtapa(): String = if (completed) "Terminada" else "Etapa ${stage + 1}"
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Etiquetas.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package com.comisiones.app.ui.screens
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import com.comisiones.app.data.Etapas
+import com.comisiones.app.data.Tag
+import com.comisiones.app.data.TipoEtiqueta
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.DiasBadge
+import com.comisiones.app.ui.DialogoConfirmar
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.ui.Vacio
+
+// ======================= RANKING DE PERSONAJES / POSES / OCs =======================
+
+@Composable
+fun EtiquetasScreen(vm: AppViewModel, nav: NavController) {
+    val conteos by vm.tagCounts.collectAsState()
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var borrar by remember { mutableStateOf<Tag?>(null) }
+    val lista = conteos.filter { it.tag.type == tab }
+    val maximo = (lista.maxOfOrNull { it.uses } ?: 1).coerceAtLeast(1)
+
+    Pantalla("Lo más pedido") { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            TabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
+                TipoEtiqueta.nombres.forEachIndexed { i, n ->
+                    Tab(selected = tab == i, onClick = { tab = i }, text = { Text(n, maxLines = 1) })
+                }
+            }
+            if (lista.isEmpty()) {
+                Vacio(
+                    "Aún no hay ${TipoEtiqueta.nombres[tab].lowercase()}.\n" +
+                        "Agrégalos dentro de cada comisión y aquí verás cuáles te piden más."
+                )
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item {
+                        val top = lista.first()
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(Modifier.padding(16.dp)) {
+                                Text("El más pedido", style = MaterialTheme.typography.labelLarge)
+                                Text(top.tag.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                                Text("Pedido ${top.uses} ${if (top.uses == 1) "vez" else "veces"}")
+                            }
+                        }
+                    }
+                    itemsIndexed(lista, key = { _, t -> t.tag.id }) { i, tc ->
+                        Card(onClick = { nav.navigate("etiqueta/${tc.tag.id}") }, modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "#${i + 1}",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.width(40.dp)
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(tc.tag.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    LinearProgressIndicator(
+                                        progress = { tc.uses.toFloat() / maximo },
+                                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    "×${tc.uses}",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (tc.uses >= 2) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface
+                                )
+                                IconButton(onClick = { borrar = tc.tag }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Borrar", tint = MaterialTheme.colorScheme.outline)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    borrar?.let { t ->
+        DialogoConfirmar(
+            "¿Borrar «${t.name}»?",
+            "Se quitará de todas las comisiones donde aparece (las comisiones no se borran).",
+            onDismiss = { borrar = null }
+        ) {
+            borrar = null
+            vm.borrarEtiqueta(t)
+        }
+    }
+}
+
+// ======================= COMISIONES DE UNA ETIQUETA =======================
+
+@Composable
+fun EtiquetaScreen(vm: AppViewModel, nav: NavController, id: Long) {
+    val etiqueta by remember(id) { vm.tag(id) }.collectAsState(initial = null)
+    val comisiones by remember(id) { vm.commissionsWithTag(id) }.collectAsState(initial = emptyList())
+    val t = etiqueta
+    Pantalla(t?.name ?: "Etiqueta", onBack = { nav.popBackStack() }) { pad ->
+        LazyColumn(
+            Modifier.padding(pad).fillMaxSize(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            item {
+                Text(
+                    (t?.let { TipoEtiqueta.singular.getOrElse(it.type) { "" } } ?: "") +
+                        " · pedido ${comisiones.size} ${if (comisiones.size == 1) "vez" else "veces"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (comisiones.isEmpty()) item { Vacio("Ninguna comisión usa esta etiqueta.") }
+            items(comisiones, key = { it.commission.id }) { cw ->
+                val m = cw.commission
+                Card(onClick = { nav.navigate("comision/${m.id}") }, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                m.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                textDecoration = if (m.completed) TextDecoration.LineThrough else null
+                            )
+                            Text(
+                                cw.clientName + " · " + if (m.completed) "Terminada" else Etapas.nombres.getOrElse(m.stage) { "" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        DiasBadge(m.lastWorkedAt, m.completed, vm.diasRojo)
+                    }
+                }
+            }
+        }
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Galeria.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package com.comisiones.app.ui.screens
+
+import android.content.Intent
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import androidx.navigation.NavController
+import coil.compose.AsyncImage
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.ui.Vacio
+import com.comisiones.app.ui.Verde
+import com.comisiones.app.ui.VisorImagen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+// ======================= GALERÍA (una tarjeta por comisión) =======================
+
+@Composable
+fun GaleriaScreen(vm: AppViewModel, nav: NavController) {
+    val comisiones by vm.allCommissions.collectAsState()
+    val imagenes by vm.imageRefs.collectAsState()
+    val clientes by vm.clients.collectAsState()
+    var filtro by rememberSaveable { mutableLongStateOf(-1L) }
+    val porComision = remember(imagenes) { imagenes.groupBy { it.commissionId } }
+    val lista = comisiones.filter { filtro == -1L || it.commission.clientId == filtro }
+
+    Pantalla("Galería") { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item { FilterChip(selected = filtro == -1L, onClick = { filtro = -1L }, label = { Text("Todos") }) }
+                items(clientes, key = { it.client.id }) { c ->
+                    FilterChip(selected = filtro == c.client.id, onClick = { filtro = c.client.id }, label = { Text(c.client.name) })
+                }
+            }
+            if (lista.isEmpty()) {
+                Vacio("Aquí aparecerá automáticamente cada comisión con sus referencias y su ficha en español.")
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(155.dp),
+                    contentPadding = PaddingValues(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(lista, key = { it.commission.id }) { cw ->
+                        val fotos = porComision[cw.commission.id].orEmpty()
+                        Card(onClick = { nav.navigate("ficha/${cw.commission.id}") }) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(0.85f)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                            ) {
+                                if (fotos.isNotEmpty()) {
+                                    AsyncImage(
+                                        model = File(fotos.first().imagePath),
+                                        contentDescription = null,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Default.Image, contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.outline,
+                                        modifier = Modifier.align(Alignment.Center).size(48.dp)
+                                    )
+                                }
+                                if (fotos.size > 1) {
+                                    Text(
+                                        "+${fotos.size - 1}",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(6.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.Black.copy(alpha = 0.6f))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                if (cw.commission.completed) {
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.TopStart)
+                                            .padding(6.dp)
+                                            .size(26.dp)
+                                            .clip(CircleShape)
+                                            .background(Verde),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(Icons.Default.Check, contentDescription = "Terminada", tint = Color.Black, modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
+                            Column(Modifier.padding(10.dp)) {
+                                Text(
+                                    cw.commission.title,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    cw.clientName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ======================= FICHA DE UNA COMISIÓN =======================
+
+@Composable
+fun FichaScreen(vm: AppViewModel, nav: NavController, id: Long) {
+    val ctx = LocalContext.current
+    val comision by remember(id) { vm.commission(id) }.collectAsState(initial = null)
+    val refs by remember(id) { vm.refsOf(id) }.collectAsState(initial = emptyList())
+    val tags by remember(id) { vm.tagsOf(id) }.collectAsState(initial = emptyList())
+    val m = comision
+    val clienteId = m?.clientId ?: -1L
+    val cliente by remember(clienteId) { vm.client(clienteId) }.collectAsState(initial = null)
+
+    var archivo by remember { mutableStateOf<File?>(null) }
+    var imagen by remember { mutableStateOf<ImageBitmap?>(null) }
+    var cargando by remember { mutableStateOf(true) }
+    var visor by remember { mutableStateOf<String?>(null) }
+
+    // Se vuelve a generar sola cada vez que cambia algo de la comisión
+    LaunchedEffect(m, refs, tags, cliente) {
+        if (m != null) {
+            cargando = true
+            val f = vm.generarFicha(m, cliente?.name ?: "", refs, tags)
+            archivo = f
+            imagen = if (f != null) withContext(Dispatchers.IO) {
+                BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap()
+            } else null
+            cargando = false
+        }
+    }
+
+    fun compartir() {
+        val f = archivo ?: return
+        val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
+        val envio = Intent(Intent.ACTION_SEND)
+            .setType("image/png")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        ctx.startActivity(Intent.createChooser(envio, "Compartir ficha"))
+    }
+
+    Pantalla(
+        m?.title ?: "Ficha",
+        onBack = { nav.popBackStack() },
+        acciones = {
+            IconButton(onClick = { compartir() }, enabled = archivo != null) { Icon(Icons.Default.Share, contentDescription = "Compartir") }
+            IconButton(
+                onClick = { archivo?.let { vm.guardarEnGaleria(it, "ficha_${id}_${System.currentTimeMillis()}.png") } },
+                enabled = archivo != null
+            ) { Icon(Icons.Default.Download, contentDescription = "Guardar en galería") }
+        }
+    ) { pad ->
+        Column(
+            Modifier
+                .padding(pad)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            val img = imagen
+            if (img != null) {
+                Image(
+                    bitmap = img,
+                    contentDescription = "Ficha en español",
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { archivo?.let { visor = it.absolutePath } }
+                )
+            } else {
+                Box(Modifier.fillMaxWidth().height(240.dp), contentAlignment = Alignment.Center) {
+                    if (cargando) CircularProgressIndicator() else Text("No se pudo crear la ficha")
+                }
+            }
+            Text(
+                "Toca la ficha para verla en grande. Usa ⬇ para guardarla en la galería de tu teléfono o compártela.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedButton(onClick = { nav.navigate("comision/$id") }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Abrir / editar la comisión")
+            }
+            val fotos = refs.filter { it.kind == 0 }
+            if (fotos.isNotEmpty()) {
+                Text("Imágenes originales", style = MaterialTheme.typography.titleMedium)
+                fotos.forEach { r ->
+                    AsyncImage(
+                        model = File(r.imagePath),
+                        contentDescription = null,
+                        contentScale = ContentScale.FillWidth,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { visor = r.imagePath }
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    visor?.let { ruta -> VisorImagen(ruta, onDismiss = { visor = null }) }
+}
+@@@ app/src/main/java/com/comisiones/app/ui/screens/Horario.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+package com.comisiones.app.ui.screens
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
+import com.comisiones.app.ui.AppViewModel
+import com.comisiones.app.ui.Avatar
+import com.comisiones.app.ui.DiasBadge
+import com.comisiones.app.ui.Pantalla
+import com.comisiones.app.util.DIAS
+import com.comisiones.app.util.DIAS_CORTOS
+import com.comisiones.app.util.hoyNumero
+
+@Composable
+fun HorarioScreen(vm: AppViewModel, nav: NavController) {
+    val slots by vm.schedule.collectAsState()
+    val clientes by vm.clients.collectAsState()
+    val porId = remember(clientes) { clientes.associateBy { it.client.id } }
+    val hoy = hoyNumero()
+    var agregarEn by remember { mutableStateOf<Int?>(null) }
+    var generar by remember { mutableStateOf(false) }
+
+    Pantalla(
+        "Horario semanal",
+        acciones = {
+            TextButton(onClick = { generar = true }) {
+                Icon(Icons.Default.AutoAwesome, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Horario justo")
+            }
+        }
+    ) { pad ->
+        LazyColumn(
+            Modifier.padding(pad).fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                val deHoy = slots.filter { it.slot.dayOfWeek == hoy }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Hoy ${DIAS[hoy - 1].lowercase()} toca dibujar a:", style = MaterialTheme.typography.titleMedium)
+                        if (deHoy.isEmpty()) {
+                            Text("Nadie asignado. Toca «✨ Horario justo» arriba para repartir a tus clientes.")
+                        } else {
+                            deHoy.forEach { s ->
+                                Text(
+                                    "• ${s.clientName}",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable { nav.navigate("cliente/${s.slot.clientId}") }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            items((1..7).toList()) { dia ->
+                val delDia = slots.filter { it.slot.dayOfWeek == dia }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                DIAS[dia - 1],
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (dia == hoy) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                fontWeight = if (dia == hoy) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (dia == hoy) {
+                                Text("HOY", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            }
+                            TextButton(onClick = { agregarEn = dia }) { Text("+ Cliente") }
+                        }
+                        if (delDia.isEmpty()) {
+                            Text(
+                                "Libre",
+                                color = MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
+                        delDia.forEach { s ->
+                            val resumen = porId[s.slot.clientId]
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { nav.navigate("cliente/${s.slot.clientId}") }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Avatar(s.clientName, 34)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(s.clientName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (resumen != null) {
+                                        Text(
+                                            "${resumen.activeCount} comisión(es) activa(s)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                if (resumen != null) {
+                                    DiasBadge(
+                                        if (resumen.activeCount > 0) resumen.lastWorked else null,
+                                        resumen.totalCount > 0 && resumen.activeCount == 0,
+                                        vm.diasRojo
+                                    )
+                                }
+                                IconButton(onClick = { vm.quitarDelHorario(s.slot) }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Quitar")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            item {
+                Text(
+                    "✨ El horario justo reparte a TODOS tus clientes con comisiones activas entre los días que elijas, " +
+                        "empezando hoy por quien lleva más días sin ser dibujado. Así nadie se queda atrás ni hay favoritos.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(8.dp)
+                )
+            }
+        }
+    }
+
+    agregarEn?.let { dia ->
+        AlertDialog(
+            onDismissRequest = { agregarEn = null },
+            title = { Text("Agregar al ${DIAS[dia - 1].lowercase()}") },
+            text = {
+                if (clientes.isEmpty()) {
+                    Text("Primero agrega clientes.")
+                } else {
+                    Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                        clientes.forEach { c ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        vm.agregarAlHorario(dia, c.client.id)
+                                        agregarEn = null
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Avatar(c.client.name, 34)
+                                Spacer(Modifier.width(10.dp))
+                                Text(c.client.name, modifier = Modifier.weight(1f))
+                                DiasBadge(
+                                    if (c.activeCount > 0) c.lastWorked else null,
+                                    c.totalCount > 0 && c.activeCount == 0,
+                                    vm.diasRojo
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { agregarEn = null }) { Text("Cerrar") } }
+        )
+    }
+
+    if (generar) {
+        val elegidos = remember { mutableStateListOf(1, 2, 3, 4, 5, 6) }
+        AlertDialog(
+            onDismissRequest = { generar = false },
+            title = { Text("✨ Horario justo") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("¿Qué días dibujas?")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        (1..7).forEach { d ->
+                            FilterChip(
+                                selected = d in elegidos,
+                                onClick = { if (d in elegidos) elegidos.remove(d) else elegidos.add(d) },
+                                label = { Text(DIAS_CORTOS[d - 1]) }
+                            )
+                        }
+                    }
+                    Text(
+                        "Esto reemplaza el horario actual.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = elegidos.isNotEmpty(), onClick = {
+                    vm.generarHorarioJusto(elegidos.toList())
+                    generar = false
+                }) { Text("Generar") }
+            },
+            dismissButton = { TextButton(onClick = { generar = false }) { Text("Cancelar") } }
+        )
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/util/Ficha.kt @@@
+package com.comisiones.app.util
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.text.Layout
+import android.text.StaticLayout
+import android.text.TextPaint
+import com.comisiones.app.data.Commission
+import com.comisiones.app.data.Etapas
+import com.comisiones.app.data.Reference
+import com.comisiones.app.data.Tag
+import com.comisiones.app.data.TipoEtiqueta
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+// Genera una "ficha" en imagen: el pedido traducido al español + etiquetas + las imágenes de referencia.
+object Ficha {
+    private const val ANCHO = 1080
+    private const val MARGEN = 56
+    private const val ALTO_MAX = 9000
+    private const val SEP = 24
+
+    private val FONDO = Color.parseColor("#17131F")
+    private val TARJETA = Color.parseColor("#241D2E")
+    private val ROSA = Color.parseColor("#FF8FC7")
+    private val LILA = Color.parseColor("#B9A6FF")
+    private val BLANCO = Color.parseColor("#F2ECF7")
+    private val GRIS = Color.parseColor("#9C93A8")
+    private val VERDE = Color.parseColor("#5BD68A")
+    private val AMBAR = Color.parseColor("#FFC46B")
+
+    private class Bloque(val alto: Int, val dibujar: (Canvas, Float) -> Unit)
+
+    fun archivoDe(ctx: Context, id: Long): File = File(File(ctx.filesDir, "fichas").apply { mkdirs() }, "ficha_$id.png")
+
+    suspend fun generar(
+        ctx: Context,
+        m: Commission,
+        cliente: String,
+        refs: List<Reference>,
+        tags: List<Tag>
+    ): File = withContext(Dispatchers.IO) {
+        val ancho = ANCHO - MARGEN * 2
+        val bloques = mutableListOf<Bloque>()
+        val bitmaps = mutableListOf<Bitmap>()
+
+        fun texto(t: String, tam: Float, color: Int, negrita: Boolean = false, despues: Int = 12) {
+            val l = layout(t, tam, color, negrita, ancho)
+            bloques += Bloque(l.height + despues) { c, y ->
+                c.save(); c.translate(MARGEN.toFloat(), y); l.draw(c); c.restore()
+            }
+        }
+
+        fun separador() {
+            bloques += Bloque(SEP * 2) { c, y ->
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = TARJETA; strokeWidth = 4f }
+                c.drawLine(MARGEN.toFloat(), y + SEP, (ANCHO - MARGEN).toFloat(), y + SEP, p)
+            }
+        }
+
+        // Encabezado
+        texto("✦ FICHA DE COMISIÓN", 30f, ROSA, true, 14)
+        texto(m.title, 66f, BLANCO, true, 8)
+        texto("Cliente: $cliente", 40f, LILA, false, 18)
+        val estado = if (m.completed) "✓ Terminada"
+        else "Etapa actual: ${Etapas.nombres.getOrElse(m.stage) { "" }} (${m.stage + 1}/4)"
+        texto(estado, 36f, if (m.completed) VERDE else AMBAR, true, 10)
+
+        // Etiquetas
+        TipoEtiqueta.nombres.forEachIndexed { tipo, nombre ->
+            val deTipo = tags.filter { it.type == tipo }
+            if (deTipo.isNotEmpty()) texto("$nombre: " + deTipo.joinToString(" · ") { it.name }, 36f, BLANCO, false, 8)
+        }
+        separador()
+
+        // Pedido
+        texto("LO QUE PIDIÓ (EN ESPAÑOL)", 30f, ROSA, true, 14)
+        val desc = when {
+            m.descriptionEs.isNotBlank() -> m.descriptionEs
+            m.descriptionEn.isNotBlank() -> m.descriptionEn + "\n(todavía sin traducir)"
+            else -> "(sin descripción)"
+        }
+        texto(desc, 42f, BLANCO, false, 16)
+
+        val textos = refs.filter { it.kind == 1 }
+        if (textos.isNotEmpty()) {
+            separador()
+            texto("NOTAS DE REFERENCIA", 30f, ROSA, true, 14)
+            textos.forEach { r -> texto("• " + r.textEs.ifBlank { r.textEn }, 38f, BLANCO, false, 14) }
+        }
+
+        // Imágenes en cuadrícula de 2 columnas
+        val imagenes = refs.filter { it.kind == 0 }.take(10)
+        if (imagenes.isNotEmpty()) {
+            separador()
+            texto("IMÁGENES DE REFERENCIA", 30f, ROSA, true, 18)
+            val hueco = 20
+            val columnas = if (imagenes.size == 1) 1 else 2
+            val celda = (ancho - hueco * (columnas - 1)) / columnas
+            val altoMaxCelda = if (columnas == 1) 1300 else 760
+            imagenes.chunked(columnas).forEach { fila ->
+                val bms = fila.mapNotNull { Archivos.decodificar(it.imagePath, celda) }
+                bitmaps += bms
+                if (bms.isNotEmpty()) {
+                    val altos = bms.map { b -> (b.height * (celda.toFloat() / b.width)).toInt().coerceAtMost(altoMaxCelda) }
+                    val altoFila = altos.max()
+                    bloques += Bloque(altoFila + hueco) { c, y ->
+                        bms.forEachIndexed { i, b ->
+                            val x = MARGEN + i * (celda + hueco)
+                            val destino = RectF(x.toFloat(), y, (x + celda).toFloat(), y + altos[i])
+                            val clip = Path().apply { addRoundRect(destino, 22f, 22f, Path.Direction.CW) }
+                            // Recorta la imagen si es demasiado alta (se queda con el centro)
+                            val altoFuente = (altos[i] * (b.width.toFloat() / celda)).toInt().coerceAtMost(b.height)
+                            val top = (b.height - altoFuente) / 2
+                            c.save(); c.clipPath(clip)
+                            c.drawBitmap(b, Rect(0, top, b.width, top + altoFuente), destino, Paint(Paint.FILTER_BITMAP_FLAG))
+                            c.restore()
+                        }
+                    }
+                }
+            }
+        }
+
+        texto("Mis Comisiones · ${formatoDia(System.currentTimeMillis())}", 26f, GRIS, false, 0)
+
+        val alto = (MARGEN * 2 + bloques.sumOf { it.alto }).coerceAtMost(ALTO_MAX)
+        val bmp = Bitmap.createBitmap(ANCHO, alto, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(FONDO)
+        // franja de color arriba
+        canvas.drawRect(0f, 0f, ANCHO.toFloat(), 14f, Paint().apply { color = ROSA })
+        var y = MARGEN.toFloat()
+        for (b in bloques) {
+            if (y > alto) break
+            b.dibujar(canvas, y)
+            y += b.alto
+        }
+
+        val archivo = archivoDe(ctx, m.id)
+        archivo.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        bmp.recycle()
+        bitmaps.forEach { it.recycle() }
+        archivo
+    }
+
+    private fun layout(t: String, tam: Float, color: Int, negrita: Boolean, ancho: Int): StaticLayout {
+        val p = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = tam
+            this.color = color
+            typeface = if (negrita) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
+        return StaticLayout.Builder.obtain(t, 0, t.length, p, ancho)
+            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+            .setLineSpacing(0f, 1.15f)
+            .build()
+    }
+}
+@@@ app/src/main/java/com/comisiones/app/util/Utiles.kt @@@
+package com.comisiones.app.util
+
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
+import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
+import com.google.android.gms.tasks.Task
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import java.util.Locale
+import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+// ---------------- Ajustes ----------------
+
+class Ajustes(ctx: Context) {
+    private val p = ctx.applicationContext.getSharedPreferences("ajustes", Context.MODE_PRIVATE)
+
+    var diasRojo: Int
+        get() = p.getInt("diasRojo", 7)
+        set(v) = p.edit().putInt("diasRojo", v).apply()
+
+    var diarioActivo: Boolean
+        get() = p.getBoolean("diarioActivo", true)
+        set(v) = p.edit().putBoolean("diarioActivo", v).apply()
+
+    var diarioHora: Int
+        get() = p.getInt("diarioHora", 10)
+        set(v) = p.edit().putInt("diarioHora", v).apply()
+
+    var diarioMinuto: Int
+        get() = p.getInt("diarioMinuto", 0)
+        set(v) = p.edit().putInt("diarioMinuto", v).apply()
+
+    var permisoPedido: Boolean
+        get() = p.getBoolean("permisoPedido", false)
+        set(v) = p.edit().putBoolean("permisoPedido", v).apply()
+}
+
+// ---------------- Fechas ----------------
+
+val DIAS = listOf("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
+val DIAS_CORTOS = listOf("L", "M", "X", "J", "V", "S", "D")
+
+private val ES = Locale("es", "MX")
+private val FORMATO = DateTimeFormatter.ofPattern("EEE d 'de' MMM, HH:mm", ES)
+private val FORMATO_DIA = DateTimeFormatter.ofPattern("d 'de' MMMM yyyy", ES)
+
+fun diasDesde(t: Long?): Int {
+    if (t == null) return 0
+    val z = ZoneId.systemDefault()
+    val d = ChronoUnit.DAYS.between(Instant.ofEpochMilli(t).atZone(z).toLocalDate(), LocalDate.now(z))
+    return d.toInt().coerceAtLeast(0)
+}
+
+fun formatoFecha(t: Long): String = FORMATO.format(Instant.ofEpochMilli(t).atZone(ZoneId.systemDefault()))
+
+fun formatoDia(t: Long): String = FORMATO_DIA.format(Instant.ofEpochMilli(t).atZone(ZoneId.systemDefault()))
+
+fun hoyNumero(): Int = LocalDate.now().dayOfWeek.value
+
+// ---------------- Traductor (inglés → español, funciona sin internet tras descargar) ----------------
+
+object Traductor {
+    private val traductor by lazy {
+        Translation.getClient(
+            TranslatorOptions.Builder()
+                .setSourceLanguage(TranslateLanguage.ENGLISH)
+                .setTargetLanguage(TranslateLanguage.SPANISH)
+                .build()
+        )
+    }
+
+    suspend fun descargar() {
+        esperar(traductor.downloadModelIfNeeded(DownloadConditions.Builder().build()))
+    }
+
+    suspend fun traducir(texto: String): String {
+        if (texto.isBlank()) return ""
+        descargar()
+        // Línea por línea para conservar los saltos de línea del cliente
+        return texto.split("\n").joinToString("\n") { linea ->
+            if (linea.isBlank()) linea else esperar(traductor.translate(linea))
+        }
+    }
+
+    private suspend fun <T> esperar(tarea: Task<T>): T = suspendCancellableCoroutine { cont ->
+        tarea.addOnSuccessListener { r -> if (cont.isActive) cont.resume(r) }
+        tarea.addOnFailureListener { e -> if (cont.isActive) cont.resumeWithException(e) }
+    }
+}
+
+// ---------------- Archivos ----------------
+
+object Archivos {
+    // Copia una imagen elegida a la memoria interna de la app para que no se pierda.
+    fun copiarImagen(ctx: Context, uri: Uri): String? = try {
+        val dir = File(ctx.filesDir, "refs").apply { mkdirs() }
+        val f = File(dir, UUID.randomUUID().toString() + ".img")
+        val ok = ctx.contentResolver.openInputStream(uri)?.use { entrada ->
+            f.outputStream().use { salida -> entrada.copyTo(salida) }
+            true
+        } ?: false
+        if (ok) f.absolutePath else null
+    } catch (e: Exception) {
+        null
+    }
+
+    fun borrar(path: String) {
+        if (path.isNotBlank()) runCatching { File(path).delete() }
+    }
+
+    // Decodifica una imagen reduciéndola al ancho indicado (respeta la rotación de la foto).
+    fun decodificar(path: String, anchoMax: Int): Bitmap? = try {
+        val src = ImageDecoder.createSource(File(path))
+        ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            val w = info.size.width
+            val h = info.size.height
+            if (w > anchoMax && w > 0) {
+                val escala = anchoMax.toFloat() / w
+                decoder.setTargetSize(anchoMax, (h * escala).toInt().coerceAtLeast(1))
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    // Guarda una copia en la galería del teléfono (Imágenes/MisComisiones).
+    fun guardarEnGaleria(ctx: Context, archivo: File, nombre: String): Boolean = try {
+        val resolver = ctx.contentResolver
+        val valores = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, nombre)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MisComisiones")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, valores)
+        if (uri == null) {
+            false
+        } else {
+            resolver.openOutputStream(uri)?.use { salida -> archivo.inputStream().use { it.copyTo(salida) } }
+            valores.clear()
+            valores.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, valores, null, null)
+            true
+        }
+    } catch (e: Exception) {
+        false
+    }
+}
+@@@ app/src/main/res/drawable/ic_launcher_fg.xml @@@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <group android:scaleX="0.5" android:scaleY="0.5" android:pivotX="12" android:pivotY="12">
+        <path android:fillColor="#FFFF8FC7" android:pathData="M12,3c-4.97,0 -9,4.03 -9,9s4.03,9 9,9c0.83,0 1.5,-0.67 1.5,-1.5 0,-0.39 -0.15,-0.74 -0.39,-1.01 -0.23,-0.26 -0.38,-0.61 -0.38,-0.99 0,-0.83 0.67,-1.5 1.5,-1.5L16,16c2.76,0 5,-2.24 5,-5 0,-4.42 -4.03,-8 -9,-8zM6.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S5.67,9 6.5,9 8,9.67 8,10.5 7.33,12 6.5,12zM9.5,8C8.67,8 8,7.33 8,6.5S8.67,5 9.5,5s1.5,0.67 1.5,1.5S10.33,8 9.5,8zM14.5,8c-0.83,0 -1.5,-0.67 -1.5,-1.5S13.67,5 14.5,5s1.5,0.67 1.5,1.5S15.33,8 14.5,8zM17.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S16.67,9 17.5,9s1.5,0.67 1.5,1.5 -0.67,1.5 -1.5,1.5z" />
+    </group>
+</vector>
+@@@ app/src/main/res/drawable/ic_notif.xml @@@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M12,3c-4.97,0 -9,4.03 -9,9s4.03,9 9,9c0.83,0 1.5,-0.67 1.5,-1.5 0,-0.39 -0.15,-0.74 -0.39,-1.01 -0.23,-0.26 -0.38,-0.61 -0.38,-0.99 0,-0.83 0.67,-1.5 1.5,-1.5L16,16c2.76,0 5,-2.24 5,-5 0,-4.42 -4.03,-8 -9,-8zM6.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S5.67,9 6.5,9 8,9.67 8,10.5 7.33,12 6.5,12zM9.5,8C8.67,8 8,7.33 8,6.5S8.67,5 9.5,5s1.5,0.67 1.5,1.5S10.33,8 9.5,8zM14.5,8c-0.83,0 -1.5,-0.67 -1.5,-1.5S13.67,5 14.5,5s1.5,0.67 1.5,1.5S15.33,8 14.5,8zM17.5,12c-0.83,0 -1.5,-0.67 -1.5,-1.5S16.67,9 17.5,9s1.5,0.67 1.5,1.5 -0.67,1.5 -1.5,1.5z" />
+</vector>
+@@@ app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml @@@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/icono_fondo" />
+    <foreground android:drawable="@drawable/ic_launcher_fg" />
+</adaptive-icon>
+@@@ app/src/main/res/values/colors.xml @@@
+<resources>
+    <color name="fondo">#FF17131F</color>
+    <color name="rosa">#FFFF8FC7</color>
+    <color name="icono_fondo">#FF2A1638</color>
+</resources>
+@@@ app/src/main/res/values/strings.xml @@@
+<resources>
+    <string name="app_name">Mis Comisiones</string>
+</resources>
+@@@ app/src/main/res/values/themes.xml @@@
+<resources>
+    <style name="Theme.Comisiones" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/fondo</item>
+        <item name="android:colorAccent">@color/rosa</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>
+@@@ app/src/main/res/xml/file_paths.xml @@@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="fichas" path="fichas/" />
+</paths>
+@@@ build.gradle.kts @@@
+plugins {
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+    id("com.google.devtools.ksp") version "2.0.21-1.0.28" apply false
+}
+@@@ gradle.properties @@@
+org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+kotlin.code.style=official
+@@@ settings.gradle.kts @@@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "MisComisiones"
+include(":app")
