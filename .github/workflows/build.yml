@@ -3,6 +3,7 @@ name: Compilar APK
 on:
   push:
     branches: [main]
+    paths: [codigo.txt]
   workflow_dispatch:
 
 permissions:
