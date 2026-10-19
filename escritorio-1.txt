@@ -1,0 +1,1939 @@
+@@@ build.gradle.kts @@@
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+
+plugins {
+    kotlin("jvm") version "2.0.21"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
+    id("org.jetbrains.compose") version "1.7.3"
+    kotlin("plugin.serialization") version "2.0.21"
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
+    implementation(compose.materialIconsExtended)
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.9.0")
+}
+
+kotlin {
+    jvmToolchain(17)
+}
+
+compose.desktop {
+    application {
+        mainClass = "comisiones.MainKt"
+        nativeDistributions {
+            targetFormats(TargetFormat.Msi)
+            packageName = "MisComisiones"
+            packageVersion = "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+            description = "Mis Comisiones"
+            vendor = "Mis Comisiones"
+            includeAllModules = true
+            windows {
+                menuGroup = "Mis Comisiones"
+                shortcut = true
+                menu = true
+                perUserInstall = true
+                upgradeUuid = "8f6c2b1e-4a7d-4c3e-9b52-6d1f0e7a9c41"
+                val ico = project.file("icono.ico")
+                if (ico.exists()) iconFile.set(ico)
+            }
+        }
+    }
+}
+@@@ gradle.properties @@@
+org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+kotlin.code.style=official
+@@@ settings.gradle.kts @@@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+rootProject.name = "MisComisiones"
+@@@ src/main/kotlin/comisiones/Acciones.kt @@@
+package comisiones
+
+import androidx.compose.runtime.mutableStateMapOf
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.io.File
+
+// Todo lo que se puede hacer en la app (crear, editar, borrar, traducir...)
+object Acciones {
+    private val alcance = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Claves "d<id>" (descripción) o "r<id>" (referencia) mientras se traducen
+    val traduciendo = mutableStateMapOf<String, Boolean>()
+
+    private fun d(): Datos = Almacen.datos.value
+
+    private fun cambiarComision(id: Long, f: (Comision) -> Comision) =
+        Almacen.cambiar { d -> d.copy(comisiones = d.comisiones.map { if (it.id == id) f(it) else it }) }
+
+    private fun cambiarRef(id: Long, f: (Referencia) -> Referencia) =
+        Almacen.cambiar { d -> d.copy(referencias = d.referencias.map { if (it.id == id) f(it) else it }) }
+
+    // ---------- Clientes ----------
+    fun guardarCliente(id: Long?, nombre: String, contacto: String, notas: String) {
+        if (nombre.isBlank()) return
+        if (id == null) {
+            Almacen.cambiar { d ->
+                d.copy(
+                    sigId = d.sigId + 1,
+                    clientes = d.clientes + Cliente(d.sigId, nombre.trim(), contacto.trim(), notas.trim(), ahora())
+                )
+            }
+            Avisos.decir("Cliente agregado")
+        } else {
+            Almacen.cambiar { d ->
+                d.copy(clientes = d.clientes.map {
+                    if (it.id == id) it.copy(nombre = nombre.trim(), contacto = contacto.trim(), notas = notas.trim()) else it
+                })
+            }
+        }
+    }
+
+    fun borrarCliente(id: Long) {
+        val ids = d().comisiones.filter { it.clienteId == id }.map { it.id }.toSet()
+        val rutas = d().referencias.filter { it.comisionId in ids && it.tipo == 0 }.map { it.ruta }
+        Almacen.cambiar { d ->
+            d.copy(
+                clientes = d.clientes.filter { it.id != id },
+                comisiones = d.comisiones.filter { it.clienteId != id },
+                referencias = d.referencias.filter { it.comisionId !in ids },
+                horario = d.horario.filter { it.clienteId != id }
+            )
+        }
+        rutas.forEach { Archivos.borrar(it) }
+        ids.forEach { runCatching { Ficha.archivoDe(it).delete() } }
+        Avisos.decir("Cliente eliminado")
+    }
+
+    // ---------- Comisiones ----------
+    fun crearComision(clienteId: Long, titulo: String, descEn: String): Long {
+        val t = ahora()
+        val id = Almacen.cambiarY { d ->
+            val nuevo = d.sigId
+            d.copy(
+                sigId = nuevo + 1,
+                comisiones = d.comisiones + Comision(
+                    id = nuevo, clienteId = clienteId, titulo = titulo.trim(), descEn = descEn.trim(),
+                    creada = t, ultimoTrabajo = t
+                )
+            ) to nuevo
+        }
+        if (descEn.isNotBlank()) traducirDescripcion(id)
+        return id
+    }
+
+    fun editarComision(id: Long, titulo: String, descEn: String) {
+        val m = d().comision(id) ?: return
+        val cambio = descEn.trim() != m.descEn
+        cambiarComision(id) {
+            it.copy(titulo = titulo.trim(), descEn = descEn.trim(), descEs = if (cambio) "" else it.descEs)
+        }
+        if (cambio && descEn.isNotBlank()) traducirDescripcion(id)
+    }
+
+    fun borrarComision(id: Long) {
+        val rutas = d().referencias.filter { it.comisionId == id && it.tipo == 0 }.map { it.ruta }
+        Almacen.cambiar { d ->
+            d.copy(
+                comisiones = d.comisiones.filter { it.id != id },
+                referencias = d.referencias.filter { it.comisionId != id }
+            )
+        }
+        rutas.forEach { Archivos.borrar(it) }
+        runCatching { Ficha.archivoDe(id).delete() }
+        Avisos.decir("Comisión eliminada")
+    }
+
+    fun setTerminada(id: Long, si: Boolean) {
+        val t = ahora()
+        cambiarComision(id) {
+            if (si) it.copy(terminada = true, terminadaEn = t, ultimoTrabajo = t, etapa = 3, recordatorio = null)
+            else it.copy(terminada = false, terminadaEn = null, ultimoTrabajo = t)
+        }
+        if (si) Avisos.decir("¡Comisión terminada! ✓")
+    }
+
+    fun setEtapa(id: Long, etapa: Int) =
+        cambiarComision(id) { it.copy(etapa = etapa, terminada = false, terminadaEn = null, ultimoTrabajo = ahora()) }
+
+    fun dibujeHoy(id: Long) {
+        cambiarComision(id) { it.copy(ultimoTrabajo = ahora()) }
+        Avisos.decir("¡Anotado! El contador de días volvió a 0")
+    }
+
+    fun ponerRecordatorio(id: Long, en: Long, nota: String) {
+        cambiarComision(id) { it.copy(recordatorio = en, notaRecordatorio = nota.trim()) }
+        Avisos.decir("Recordatorio: " + formatoFecha(en))
+    }
+
+    fun quitarRecordatorio(id: Long) = cambiarComision(id) { it.copy(recordatorio = null) }
+
+    // ---------- Traducción ----------
+    fun traducirDescripcion(id: Long) {
+        val clave = "d$id"
+        if (traduciendo[clave] == true) return
+        traduciendo[clave] = true
+        alcance.launch {
+            try {
+                val en = d().comision(id)?.descEn ?: ""
+                val es = Traductor.traducir(en)
+                cambiarComision(id) { it.copy(descEs = es) }
+            } catch (e: Exception) {
+                Avisos.decir("No se pudo traducir. Revisa tu conexión a internet.")
+            } finally {
+                traduciendo.remove(clave)
+            }
+        }
+    }
+
+    fun traducirRef(id: Long) {
+        val clave = "r$id"
+        if (traduciendo[clave] == true) return
+        traduciendo[clave] = true
+        alcance.launch {
+            try {
+                val en = d().referencias.firstOrNull { it.id == id }?.textoEn ?: ""
+                val es = Traductor.traducir(en)
+                cambiarRef(id) { it.copy(textoEs = es) }
+            } catch (e: Exception) {
+                Avisos.decir("No se pudo traducir. Revisa tu conexión a internet.")
+            } finally {
+                traduciendo.remove(clave)
+            }
+        }
+    }
+
+    // ---------- Referencias ----------
+    fun agregarTexto(comisionId: Long, textoEn: String) {
+        if (textoEn.isBlank()) return
+        val t = ahora()
+        val id = Almacen.cambiarY { d ->
+            val nuevo = d.sigId
+            d.copy(sigId = nuevo + 1, referencias = d.referencias + Referencia(nuevo, comisionId, 1, textoEn = textoEn.trim(), creada = t)) to nuevo
+        }
+        traducirRef(id)
+    }
+
+    fun editarTexto(refId: Long, textoEn: String) {
+        cambiarRef(refId) { it.copy(textoEn = textoEn.trim(), textoEs = "") }
+        traducirRef(refId)
+    }
+
+    private fun agregarRutas(comisionId: Long, rutas: List<String>) {
+        if (rutas.isEmpty()) {
+            Avisos.decir("No encontré imágenes para agregar")
+            return
+        }
+        val t = ahora()
+        Almacen.cambiar { d ->
+            var s = d.sigId
+            val nuevas = rutas.mapIndexed { i, r -> Referencia(s++, comisionId, 0, ruta = r, creada = t + i) }
+            d.copy(sigId = s, referencias = d.referencias + nuevas)
+        }
+        Avisos.decir(if (rutas.size == 1) "Imagen agregada" else "${rutas.size} imágenes agregadas")
+    }
+
+    fun agregarArchivos(comisionId: Long, archivos: List<File>) {
+        alcance.launch { agregarRutas(comisionId, archivos.filter { Archivos.esImagen(it) }.mapNotNull { Archivos.copiar(it) }) }
+    }
+
+    fun pegarDelPortapapeles(comisionId: Long) {
+        val rutas = Archivos.leerPortapapeles()
+        if (rutas.isEmpty()) Avisos.decir("No hay ninguna imagen copiada. Copia una imagen (clic derecho → Copiar imagen) y vuelve a intentar.")
+        else agregarRutas(comisionId, rutas)
+    }
+
+    fun borrarRef(id: Long) {
+        val r = d().referencias.firstOrNull { it.id == id } ?: return
+        Almacen.cambiar { d -> d.copy(referencias = d.referencias.filter { it.id != id }) }
+        if (r.tipo == 0) {
+            Imagenes.olvidar(r.ruta)
+            Archivos.borrar(r.ruta)
+        }
+    }
+
+    // ---------- Etiquetas ----------
+    fun agregarEtiqueta(comisionId: Long, nombre: String, tipo: Int) {
+        val limpio = nombre.trim().replace(Regex("\\s+"), " ")
+        if (limpio.isEmpty()) return
+        val clave = limpio.lowercase()
+        Almacen.cambiar { d ->
+            val existente = d.etiquetas.firstOrNull { it.clave == clave && it.tipo == tipo }
+            val et = existente ?: Etiqueta(d.sigId, limpio, clave, tipo)
+            val base = if (existente == null) d.copy(sigId = d.sigId + 1, etiquetas = d.etiquetas + et) else d
+            base.copy(comisiones = base.comisiones.map {
+                if (it.id == comisionId && et.id !in it.etiquetas) it.copy(etiquetas = it.etiquetas + et.id) else it
+            })
+        }
+    }
+
+    fun quitarEtiqueta(comisionId: Long, etiquetaId: Long) =
+        cambiarComision(comisionId) { it.copy(etiquetas = it.etiquetas - etiquetaId) }
+
+    fun borrarEtiqueta(etiquetaId: Long) {
+        Almacen.cambiar { d ->
+            d.copy(
+                etiquetas = d.etiquetas.filter { it.id != etiquetaId },
+                comisiones = d.comisiones.map { it.copy(etiquetas = it.etiquetas - etiquetaId) }
+            )
+        }
+    }
+
+    // ---------- Horario ----------
+    fun agregarAlHorario(dia: Int, clienteId: Long) {
+        Almacen.cambiar { d ->
+            val pos = d.horario.count { it.dia == dia }
+            d.copy(sigId = d.sigId + 1, horario = d.horario + Turno(d.sigId, dia, clienteId, pos))
+        }
+    }
+
+    fun quitarDelHorario(id: Long) = Almacen.cambiar { d -> d.copy(horario = d.horario.filter { it.id != id }) }
+
+    // Reparte a todos los clientes con comisiones activas entre los días elegidos,
+    // empezando HOY con quien lleva más días sin ser dibujado. Así nadie se queda atrás.
+    fun generarHorarioJusto(dias: List<Int>) {
+        val activos = d().resumenes().filter { it.activas > 0 }.sortedBy { it.ultimo ?: 0L }
+        if (activos.isEmpty()) {
+            Avisos.decir("No hay clientes con comisiones activas")
+            return
+        }
+        if (dias.isEmpty()) {
+            Avisos.decir("Elige al menos un día")
+            return
+        }
+        val hoy = hoyNumero()
+        val ordenados = dias.sorted()
+        val orden = ordenados.filter { it >= hoy } + ordenados.filter { it < hoy }
+        val total = maxOf(activos.size, orden.size)
+        Almacen.cambiar { d ->
+            var s = d.sigId
+            val posiciones = IntArray(8)
+            val nuevos = (0 until total).map { k ->
+                val dia = orden[k % orden.size]
+                Turno(s++, dia, activos[k % activos.size].cliente.id, posiciones[dia]++)
+            }
+            d.copy(sigId = s, horario = nuevos)
+        }
+        Avisos.decir("Horario justo listo ✨")
+    }
+
+    // ---------- Ajustes ----------
+    fun cambiarAjustes(f: (Ajustes) -> Ajustes) = Almacen.cambiar { d -> d.copy(ajustes = f(d.ajustes)) }
+}
+@@@ src/main/kotlin/comisiones/Datos.kt @@@
+package comisiones
+
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.time.LocalDate
+import java.util.concurrent.Executors
+
+object Etapas {
+    val nombres = listOf("Boceto", "Lineart", "Color base", "Coloreado final")
+}
+
+object TipoEtiqueta {
+    const val PERSONAJE = 0
+    const val POSE = 1
+    const val OC = 2
+    const val OTRA = 3
+    val nombres = listOf("Personajes", "Poses", "OCs", "Otras")
+    val singular = listOf("Personaje", "Pose", "OC", "Otra")
+}
+
+@Serializable
+data class Cliente(
+    val id: Long,
+    val nombre: String,
+    val contacto: String = "",
+    val notas: String = "",
+    val creado: Long = 0L
+)
+
+@Serializable
+data class Comision(
+    val id: Long,
+    val clienteId: Long,
+    val titulo: String,
+    val descEn: String = "",
+    val descEs: String = "",
+    val etapa: Int = 0,
+    val terminada: Boolean = false,
+    val creada: Long = 0L,
+    val ultimoTrabajo: Long = 0L,
+    val terminadaEn: Long? = null,
+    val recordatorio: Long? = null,
+    val notaRecordatorio: String = "",
+    val etiquetas: List<Long> = emptyList()
+)
+
+// tipo: 0 = imagen, 1 = texto
+@Serializable
+data class Referencia(
+    val id: Long,
+    val comisionId: Long,
+    val tipo: Int,
+    val ruta: String = "",
+    val textoEn: String = "",
+    val textoEs: String = "",
+    val creada: Long = 0L
+)
+
+@Serializable
+data class Etiqueta(
+    val id: Long,
+    val nombre: String,
+    val clave: String,
+    val tipo: Int
+)
+
+// dia: 1 = lunes ... 7 = domingo
+@Serializable
+data class Turno(
+    val id: Long,
+    val dia: Int,
+    val clienteId: Long,
+    val pos: Int = 0
+)
+
+@Serializable
+data class Ajustes(
+    val diasRojo: Int = 7,
+    val diarioActivo: Boolean = true,
+    val diarioHora: Int = 10,
+    val diarioMinuto: Int = 0,
+    val ultimoResumen: String = "",
+    val cerrarABandeja: Boolean = true,
+    val avisoBandejaVisto: Boolean = false
+)
+
+@Serializable
+data class Datos(
+    val sigId: Long = 1,
+    val clientes: List<Cliente> = emptyList(),
+    val comisiones: List<Comision> = emptyList(),
+    val referencias: List<Referencia> = emptyList(),
+    val etiquetas: List<Etiqueta> = emptyList(),
+    val horario: List<Turno> = emptyList(),
+    val ajustes: Ajustes = Ajustes()
+)
+
+// ---------------- Consultas ----------------
+
+data class ResumenCliente(val cliente: Cliente, val activas: Int, val total: Int, val ultimo: Long?)
+
+fun Datos.cliente(id: Long): Cliente? = clientes.firstOrNull { it.id == id }
+fun Datos.comision(id: Long): Comision? = comisiones.firstOrNull { it.id == id }
+fun Datos.etiqueta(id: Long): Etiqueta? = etiquetas.firstOrNull { it.id == id }
+
+fun Datos.resumenes(): List<ResumenCliente> =
+    clientes.sortedBy { it.nombre.lowercase() }.map { c ->
+        val todas = comisiones.filter { it.clienteId == c.id }
+        val activas = todas.filter { !it.terminada }
+        ResumenCliente(c, activas.size, todas.size, activas.maxOfOrNull { it.ultimoTrabajo })
+    }
+
+fun Datos.comisionesDe(clienteId: Long): List<Comision> =
+    comisiones.filter { it.clienteId == clienteId }
+        .sortedWith(compareBy<Comision> { it.terminada }.thenByDescending { it.creada })
+
+fun Datos.refsDe(comisionId: Long): List<Referencia> =
+    referencias.filter { it.comisionId == comisionId }.sortedBy { it.creada }
+
+fun Datos.etiquetasDe(m: Comision): List<Etiqueta> =
+    m.etiquetas.mapNotNull { etiqueta(it) }.sortedWith(compareBy<Etiqueta> { it.tipo }.thenBy { it.nombre.lowercase() })
+
+fun Datos.usos(etiquetaId: Long): Int = comisiones.count { etiquetaId in it.etiquetas }
+
+fun Datos.conteoEtiquetas(): List<Pair<Etiqueta, Int>> =
+    etiquetas.map { it to usos(it.id) }
+        .sortedWith(compareByDescending<Pair<Etiqueta, Int>> { it.second }.thenBy { it.first.nombre.lowercase() })
+
+fun Datos.textoResumen(): String? {
+    val rojo = ajustes.diasRojo
+    val hoy = horario.filter { it.dia == hoyNumero() }.sortedBy { it.pos }
+        .mapNotNull { cliente(it.clienteId)?.nombre }.distinct()
+    val atrasadas = comisiones.filter { !it.terminada && diasDesde(it.ultimoTrabajo) >= rojo }
+        .sortedBy { it.ultimoTrabajo }
+    if (hoy.isEmpty() && atrasadas.isEmpty()) return null
+    return buildString {
+        if (hoy.isNotEmpty()) append("Hoy toca dibujar: ").append(hoy.joinToString(", "))
+        if (atrasadas.isNotEmpty()) {
+            if (isNotEmpty()) append("\n")
+            append("${atrasadas.size} comisión(es) sin avance hace $rojo+ días:")
+            atrasadas.take(4).forEach {
+                append("\n• ${it.titulo} (${cliente(it.clienteId)?.nombre ?: ""}) — ${diasDesde(it.ultimoTrabajo)} días")
+            }
+        }
+    }
+}
+
+// ---------------- Almacén (todo se guarda en un archivo en tu PC) ----------------
+
+object Almacen {
+    val carpeta: File = File(System.getenv("APPDATA") ?: System.getProperty("user.home"), "MisComisiones").apply { mkdirs() }
+    val carpetaRefs: File = File(carpeta, "referencias").apply { mkdirs() }
+    val carpetaFichas: File = File(carpeta, "fichas").apply { mkdirs() }
+    private val carpetaRespaldos: File = File(carpeta, "respaldos").apply { mkdirs() }
+    private val archivo = File(carpeta, "datos.json")
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        prettyPrint = true
+    }
+    private val escritor = Executors.newSingleThreadExecutor { r -> Thread(r, "guardar-datos") }
+    private val estado = MutableStateFlow(cargar())
+    val datos: StateFlow<Datos> = estado.asStateFlow()
+
+    private fun cargar(): Datos =
+        try {
+            if (archivo.exists()) json.decodeFromString(Datos.serializer(), archivo.readText(Charsets.UTF_8)) else Datos()
+        } catch (e: Exception) {
+            runCatching { archivo.copyTo(File(carpeta, "datos_danado_${System.currentTimeMillis()}.json"), overwrite = true) }
+            Datos()
+        }
+
+    private fun guardar(d: Datos) {
+        try {
+            // Un respaldo por día (se guardan los últimos 14)
+            if (archivo.exists()) {
+                val hoy = File(carpetaRespaldos, "datos_${LocalDate.now()}.json")
+                if (!hoy.exists()) {
+                    archivo.copyTo(hoy)
+                    carpetaRespaldos.listFiles()?.sortedBy { it.name }?.dropLast(14)?.forEach { it.delete() }
+                }
+            }
+            val tmp = File(carpeta, "datos.tmp")
+            tmp.writeText(json.encodeToString(Datos.serializer(), d), Charsets.UTF_8)
+            try {
+                Files.move(tmp.toPath(), archivo.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (e: Exception) {
+                Files.move(tmp.toPath(), archivo.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: Exception) {
+            Avisos.decir("No se pudo guardar: ${e.message}")
+        }
+    }
+
+    fun <T> cambiarY(f: (Datos) -> Pair<Datos, T>): T = synchronized(this) {
+        val (nuevo, r) = f(estado.value)
+        estado.value = nuevo
+        escritor.execute { guardar(nuevo) }
+        r
+    }
+
+    fun cambiar(f: (Datos) -> Datos) {
+        cambiarY { d -> f(d) to Unit }
+    }
+
+    fun terminarDeGuardar() {
+        escritor.shutdown()
+        runCatching { escritor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS) }
+    }
+}
+
+object Avisos {
+    val flujo = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    fun decir(t: String) {
+        flujo.tryEmit(t)
+    }
+}
+@@@ src/main/kotlin/comisiones/Ficha.kt @@@
+package comisiones
+
+import java.awt.Color
+import java.awt.Font
+import java.awt.Graphics2D
+import java.awt.RenderingHints
+import java.awt.geom.RoundRectangle2D
+import java.awt.image.BufferedImage
+import java.io.File
+import javax.imageio.ImageIO
+
+// Genera una "ficha" en imagen: el pedido traducido al español + etiquetas + las imágenes de referencia.
+object Ficha {
+    private const val ANCHO = 1080
+    private const val MARGEN = 56
+    private const val ALTO_MAX = 9000
+    private const val SEP = 24
+
+    private val FONDO = Color(0x17, 0x13, 0x1F)
+    private val LINEA = Color(0x24, 0x1D, 0x2E)
+    private val ROSA = Color(0xFF, 0x8F, 0xC7)
+    private val LILA = Color(0xB9, 0xA6, 0xFF)
+    private val BLANCO = Color(0xF2, 0xEC, 0xF7)
+    private val GRIS = Color(0x9C, 0x93, 0xA8)
+    private val VERDE = Color(0x5B, 0xD6, 0x8A)
+    private val AMBAR = Color(0xFF, 0xC4, 0x6B)
+
+    private class Bloque(val alto: Int, val dibujar: (Graphics2D, Int) -> Unit)
+
+    fun archivoDe(id: Long): File = File(Almacen.carpetaFichas, "ficha_$id.png")
+
+    private fun suavizar(g: Graphics2D) {
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+    }
+
+    fun generar(m: Comision, cliente: String, refs: List<Referencia>, tags: List<Etiqueta>): File {
+        val ancho = ANCHO - MARGEN * 2
+        val medir = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB).createGraphics()
+        suavizar(medir)
+        val bloques = mutableListOf<Bloque>()
+
+        fun fuente(tam: Int, negrita: Boolean) = Font("Segoe UI", if (negrita) Font.BOLD else Font.PLAIN, tam)
+
+        fun envolver(t: String, f: Font): List<String> {
+            val fm = medir.getFontMetrics(f)
+            val res = mutableListOf<String>()
+            for (parrafo in t.split("\n")) {
+                if (parrafo.isBlank()) {
+                    res += ""
+                    continue
+                }
+                var linea = ""
+                for (palabra in parrafo.split(" ")) {
+                    var p = palabra
+                    val prueba = if (linea.isEmpty()) p else "$linea $p"
+                    if (fm.stringWidth(prueba) <= ancho) {
+                        linea = prueba
+                    } else {
+                        if (linea.isNotEmpty()) res += linea
+                        while (p.length > 1 && fm.stringWidth(p) > ancho) {
+                            var k = p.length
+                            while (k > 1 && fm.stringWidth(p.substring(0, k)) > ancho) k--
+                            res += p.substring(0, k)
+                            p = p.substring(k)
+                        }
+                        linea = p
+                    }
+                }
+                res += linea
+            }
+            return res
+        }
+
+        fun texto(t: String, tam: Int, color: Color, negrita: Boolean = false, despues: Int = 12) {
+            val f = fuente(tam, negrita)
+            val fm = medir.getFontMetrics(f)
+            val lineas = envolver(t, f)
+            val altoLinea = (fm.height * 1.15).toInt()
+            bloques += Bloque(lineas.size * altoLinea + despues) { g, y ->
+                g.font = f
+                g.color = color
+                lineas.forEachIndexed { i, l -> g.drawString(l, MARGEN, y + i * altoLinea + fm.ascent) }
+            }
+        }
+
+        fun separador() {
+            bloques += Bloque(SEP * 2) { g, y ->
+                g.color = LINEA
+                g.fillRect(MARGEN, y + SEP - 2, ANCHO - MARGEN * 2, 4)
+            }
+        }
+
+        // Encabezado
+        texto("FICHA DE COMISIÓN", 28, ROSA, true, 14)
+        texto(m.titulo, 60, BLANCO, true, 8)
+        texto("Cliente: $cliente", 38, LILA, false, 18)
+        val estado = if (m.terminada) "Terminada"
+        else "Etapa actual: ${Etapas.nombres.getOrElse(m.etapa) { "" }} (${m.etapa + 1}/4)"
+        texto(estado, 34, if (m.terminada) VERDE else AMBAR, true, 10)
+
+        // Etiquetas
+        TipoEtiqueta.nombres.forEachIndexed { tipo, nombre ->
+            val deTipo = tags.filter { it.tipo == tipo }
+            if (deTipo.isNotEmpty()) texto("$nombre: " + deTipo.joinToString(" · ") { it.nombre }, 34, BLANCO, false, 8)
+        }
+        separador()
+
+        // Pedido
+        texto("LO QUE PIDIÓ (EN ESPAÑOL)", 28, ROSA, true, 14)
+        val desc = when {
+            m.descEs.isNotBlank() -> m.descEs
+            m.descEn.isNotBlank() -> m.descEn + "\n(todavía sin traducir)"
+            else -> "(sin descripción)"
+        }
+        texto(desc, 40, BLANCO, false, 16)
+
+        val textos = refs.filter { it.tipo == 1 }
+        if (textos.isNotEmpty()) {
+            separador()
+            texto("NOTAS DE REFERENCIA", 28, ROSA, true, 14)
+            textos.forEach { r -> texto("• " + r.textoEs.ifBlank { r.textoEn }, 36, BLANCO, false, 14) }
+        }
+
+        // Imágenes en cuadrícula de 2 columnas
+        val imagenes = refs.filter { it.tipo == 0 }.take(10)
+        if (imagenes.isNotEmpty()) {
+            separador()
+            texto("IMÁGENES DE REFERENCIA", 28, ROSA, true, 18)
+            val hueco = 20
+            val columnas = if (imagenes.size == 1) 1 else 2
+            val celda = (ancho - hueco * (columnas - 1)) / columnas
+            val altoMaxCelda = if (columnas == 1) 1300 else 760
+            imagenes.chunked(columnas).forEach { fila ->
+                val bms = fila.mapNotNull { r ->
+                    Imagenes.cargarSkia(r.ruta)?.let { Imagenes.aBuffered(Imagenes.escalada(it, celda)) }
+                }
+                if (bms.isNotEmpty()) {
+                    val altos = bms.map { b -> (b.height * (celda.toFloat() / b.width)).toInt().coerceAtMost(altoMaxCelda) }
+                    val altoFila = altos.max()
+                    bloques += Bloque(altoFila + hueco) { g, y ->
+                        bms.forEachIndexed { i, b ->
+                            val x = MARGEN + i * (celda + hueco)
+                            val alto = altos[i]
+                            // Si la imagen es muy alta se recorta y se queda con el centro
+                            val altoFuente = (alto * (b.width.toFloat() / celda)).toInt().coerceAtMost(b.height)
+                            val arriba = (b.height - altoFuente) / 2
+                            val anterior = g.clip
+                            g.clip = RoundRectangle2D.Float(x.toFloat(), y.toFloat(), celda.toFloat(), alto.toFloat(), 44f, 44f)
+                            g.drawImage(b, x, y, x + celda, y + alto, 0, arriba, b.width, arriba + altoFuente, null)
+                            g.clip = anterior
+                        }
+                    }
+                }
+            }
+        }
+
+        texto("Mis Comisiones · ${formatoDia(ahora())}", 24, GRIS, false, 0)
+        medir.dispose()
+
+        val alto = (MARGEN * 2 + bloques.sumOf { it.alto }).coerceAtMost(ALTO_MAX)
+        val bmp = BufferedImage(ANCHO, alto, BufferedImage.TYPE_INT_RGB)
+        val g = bmp.createGraphics()
+        suavizar(g)
+        g.color = FONDO
+        g.fillRect(0, 0, ANCHO, alto)
+        g.color = ROSA
+        g.fillRect(0, 0, ANCHO, 14)
+        var y = MARGEN
+        for (b in bloques) {
+            if (y > alto) break
+            b.dibujar(g, y)
+            y += b.alto
+        }
+        g.dispose()
+
+        val archivo = archivoDe(m.id)
+        ImageIO.write(bmp, "png", archivo)
+        return archivo
+    }
+}
+@@@ src/main/kotlin/comisiones/Main.kt @@@
+package comisiones
+
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Notification
+import androidx.compose.ui.window.Tray
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
+import androidx.compose.ui.window.application
+import androidx.compose.ui.window.rememberTrayState
+import androidx.compose.ui.window.rememberWindowState
+import comisiones.ui.AppUI
+import comisiones.ui.Nav
+import comisiones.ui.Ruta
+import comisiones.ui.TemaComisiones
+import comisiones.ui.Visor
+import kotlinx.coroutines.delay
+import java.awt.Color
+import java.awt.Frame
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
+import java.io.File
+import java.io.RandomAccessFile
+import java.time.LocalDate
+import java.time.LocalTime
+import kotlin.system.exitProcess
+
+// Ícono de la app (paleta rosa sobre morado)
+private fun crearIcono(): BufferedImage {
+    val img = BufferedImage(64, 64, BufferedImage.TYPE_INT_ARGB)
+    val g = img.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+    g.color = Color(0x2A, 0x16, 0x38)
+    g.fillRoundRect(0, 0, 64, 64, 22, 22)
+    g.color = Color(0xFF, 0x8F, 0xC7)
+    g.fillOval(9, 9, 46, 46)
+    g.color = Color(0x2A, 0x16, 0x38)
+    g.fillOval(18, 21, 9, 9)
+    g.fillOval(30, 15, 9, 9)
+    g.fillOval(41, 24, 9, 9)
+    g.fillOval(36, 38, 12, 12)
+    g.dispose()
+    return img
+}
+
+fun main(args: Array<String>) {
+    // Solo una ventana abierta a la vez: si ya está abierta, la mostramos.
+    val senal = File(Almacen.carpeta, "mostrar.senal")
+    val candado = try {
+        RandomAccessFile(File(Almacen.carpeta, "abierta.lock"), "rw").channel.tryLock()
+    } catch (e: Exception) {
+        null
+    }
+    if (candado == null) {
+        runCatching { senal.writeText("1") }
+        exitProcess(0)
+    }
+    runCatching { senal.delete() }
+
+    val oculto = "--oculto" in args
+    val icono = BitmapPainter(crearIcono().toComposeImageBitmap())
+
+    application {
+        var visible by remember { mutableStateOf(!oculto) }
+        var alFrente by remember { mutableIntStateOf(0) }
+        val nav = remember { Nav() }
+        var pendiente by remember { mutableStateOf<Long?>(null) }
+        val bandeja = rememberTrayState()
+        val estadoVentana = rememberWindowState(width = 1280.dp, height = 840.dp, position = WindowPosition.PlatformDefault)
+
+        fun mostrar() {
+            visible = true
+            alFrente++
+            pendiente?.let {
+                nav.ir(Ruta.Comision(it))
+                pendiente = null
+            }
+        }
+
+        fun salir() {
+            Almacen.terminarDeGuardar()
+            runCatching { candado.release() }
+            exitApplication()
+        }
+
+        // Vigilante: recordatorios, aviso diario y señal de otra ventana
+        LaunchedEffect(Unit) {
+            while (true) {
+                val d = Almacen.datos.value
+                val t = ahora()
+                d.comisiones.filter { it.recordatorio != null && it.recordatorio <= t }.forEach { m ->
+                    Acciones.quitarRecordatorio(m.id)
+                    val cliente = d.cliente(m.clienteId)?.nombre ?: ""
+                    val texto = buildString {
+                        append(cliente)
+                        if (m.notaRecordatorio.isNotBlank()) append(" — ").append(m.notaRecordatorio)
+                        append("\nVas en: ")
+                        append(if (m.terminada) "Terminada" else Etapas.nombres.getOrElse(m.etapa) { "" })
+                    }
+                    pendiente = m.id
+                    bandeja.sendNotification(Notification("⏰ ${m.titulo}", texto, Notification.Type.Info))
+                    Avisos.decir("⏰ Recordatorio: ${m.titulo} ($cliente)")
+                }
+
+                val aj = d.ajustes
+                val hoy = LocalDate.now().toString()
+                if (aj.diarioActivo && aj.ultimoResumen != hoy &&
+                    !LocalTime.now().isBefore(LocalTime.of(aj.diarioHora.coerceIn(0, 23), aj.diarioMinuto.coerceIn(0, 59)))
+                ) {
+                    Acciones.cambiarAjustes { it.copy(ultimoResumen = hoy) }
+                    d.textoResumen()?.let {
+                        bandeja.sendNotification(Notification("🎨 Tu plan de dibujo de hoy", it, Notification.Type.Info))
+                    }
+                }
+
+                if (senal.exists()) {
+                    runCatching { senal.delete() }
+                    mostrar()
+                }
+                delay(1000)
+            }
+        }
+
+        Tray(
+            icon = icono,
+            state = bandeja,
+            tooltip = "Mis Comisiones",
+            onAction = { mostrar() },
+            menu = {
+                Item("Abrir Mis Comisiones", onClick = { mostrar() })
+                Item("Salir", onClick = { salir() })
+            }
+        )
+
+        Window(
+            onCloseRequest = {
+                val aj = Almacen.datos.value.ajustes
+                if (aj.cerrarABandeja) {
+                    visible = false
+                    if (!aj.avisoBandejaVisto) {
+                        Acciones.cambiarAjustes { it.copy(avisoBandejaVisto = true) }
+                        bandeja.sendNotification(
+                            Notification(
+                                "Mis Comisiones sigue activa",
+                                "La dejé junto al reloj para avisarte de tus recordatorios. Clic derecho en el ícono → Salir para cerrarla del todo.",
+                                Notification.Type.Info
+                            )
+                        )
+                    }
+                } else {
+                    salir()
+                }
+            },
+            visible = visible,
+            title = "Mis Comisiones",
+            icon = icono,
+            state = estadoVentana,
+            onPreviewKeyEvent = { e ->
+                if (e.type == KeyEventType.KeyDown && e.key == Key.Escape) {
+                    if (Visor.ruta != null) Visor.cerrar() else nav.atras()
+                    true
+                } else {
+                    false
+                }
+            }
+        ) {
+            LaunchedEffect(alFrente) {
+                if (alFrente > 0) {
+                    if (window.extendedState == Frame.ICONIFIED) window.extendedState = Frame.NORMAL
+                    window.toFront()
+                    window.requestFocus()
+                }
+            }
+            TemaComisiones {
+                AppUI(nav)
+            }
+        }
+    }
+}
+@@@ src/main/kotlin/comisiones/Utiles.kt @@@
+package comisiones
+
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import org.jetbrains.skia.EncodedImageFormat
+import org.jetbrains.skia.Rect
+import org.jetbrains.skia.SamplingMode
+import org.jetbrains.skia.Surface
+import java.awt.Desktop
+import java.awt.FileDialog
+import java.awt.Frame
+import java.awt.Toolkit
+import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.Transferable
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URLEncoder
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import java.util.Locale
+import java.util.UUID
+import javax.imageio.ImageIO
+import org.jetbrains.skia.Image as SkImage
+
+fun ahora(): Long = System.currentTimeMillis()
+
+// ---------------- Fechas ----------------
+
+val DIAS = listOf("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")
+val DIAS_CORTOS = listOf("L", "M", "X", "J", "V", "S", "D")
+
+private val ES = Locale.forLanguageTag("es-MX")
+private val FORMATO = DateTimeFormatter.ofPattern("EEE d 'de' MMM, HH:mm", ES)
+private val FORMATO_DIA = DateTimeFormatter.ofPattern("d 'de' MMMM yyyy", ES)
+private val FORMATO_FECHA_CORTA = DateTimeFormatter.ofPattern("EEE d 'de' MMMM", ES)
+
+fun diasDesde(t: Long?): Int {
+    if (t == null || t <= 0L) return 0
+    val z = ZoneId.systemDefault()
+    val d = ChronoUnit.DAYS.between(Instant.ofEpochMilli(t).atZone(z).toLocalDate(), LocalDate.now(z))
+    return d.toInt().coerceAtLeast(0)
+}
+
+fun formatoFecha(t: Long): String = FORMATO.format(Instant.ofEpochMilli(t).atZone(ZoneId.systemDefault()))
+fun formatoDia(t: Long): String = FORMATO_DIA.format(Instant.ofEpochMilli(t).atZone(ZoneId.systemDefault()))
+fun formatoFechaCorta(d: LocalDate): String = FORMATO_FECHA_CORTA.format(d)
+fun hoyNumero(): Int = LocalDate.now().dayOfWeek.value
+
+// ---------------- Traductor (inglés → español, necesita internet) ----------------
+
+object Traductor {
+    fun traducir(texto: String): String {
+        if (texto.isBlank()) return ""
+        return texto.split("\n").joinToString("\n") { linea ->
+            if (linea.isBlank()) linea else trozo(linea)
+        }
+    }
+
+    private fun trozo(t: String): String {
+        val q = URLEncoder.encode(t, "UTF-8")
+        val url = URI("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=es&dt=t&q=$q").toURL()
+        val con = url.openConnection() as HttpURLConnection
+        con.connectTimeout = 10_000
+        con.readTimeout = 20_000
+        con.setRequestProperty("User-Agent", "Mozilla/5.0")
+        val respuesta = con.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val partes = Json.parseToJsonElement(respuesta).jsonArray[0].jsonArray
+        return partes.joinToString("") { it.jsonArray[0].jsonPrimitive.content }
+    }
+}
+
+// ---------------- Archivos ----------------
+
+object Archivos {
+    private val EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+
+    fun esImagen(f: File): Boolean = f.isFile && f.extension.lowercase() in EXT
+
+    // Copia la imagen a la carpeta de la app para que no se pierda si borras la original.
+    fun copiar(f: File): String? =
+        try {
+            val dest = File(Almacen.carpetaRefs, UUID.randomUUID().toString() + "." + f.extension.lowercase())
+            f.copyTo(dest)
+            dest.absolutePath
+        } catch (e: Exception) {
+            null
+        }
+
+    fun guardarImagenAwt(img: java.awt.Image): String? =
+        try {
+            val w = img.getWidth(null)
+            val h = img.getHeight(null)
+            if (w <= 0 || h <= 0) {
+                null
+            } else {
+                val bi = if (img is BufferedImage) img else {
+                    BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB).also {
+                        val g = it.createGraphics()
+                        g.drawImage(img, 0, 0, null)
+                        g.dispose()
+                    }
+                }
+                val dest = File(Almacen.carpetaRefs, UUID.randomUUID().toString() + ".png")
+                ImageIO.write(bi, "png", dest)
+                dest.absolutePath
+            }
+        } catch (e: Exception) {
+            null
+        }
+
+    fun borrar(ruta: String) {
+        if (ruta.isNotBlank()) runCatching { File(ruta).delete() }
+    }
+
+    // Lee imágenes del portapapeles (una imagen copiada, o archivos copiados en el explorador)
+    fun leerPortapapeles(): List<String> {
+        return try {
+            val cb = Toolkit.getDefaultToolkit().systemClipboard
+            when {
+                cb.isDataFlavorAvailable(DataFlavor.javaFileListFlavor) ->
+                    (cb.getData(DataFlavor.javaFileListFlavor) as List<*>).filterIsInstance<File>()
+                        .filter { esImagen(it) }.mapNotNull { copiar(it) }
+                cb.isDataFlavorAvailable(DataFlavor.imageFlavor) ->
+                    listOfNotNull((cb.getData(DataFlavor.imageFlavor) as? java.awt.Image)?.let { guardarImagenAwt(it) })
+                else -> emptyList()
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun elegirImagenes(): List<File> {
+        val d = FileDialog(null as Frame?, "Elegir imágenes de referencia", FileDialog.LOAD)
+        d.isMultipleMode = true
+        d.file = "*.png;*.jpg;*.jpeg;*.webp;*.gif;*.bmp"
+        d.isVisible = true
+        return d.files?.toList()?.filter { esImagen(it) } ?: emptyList()
+    }
+
+    fun elegirDondeGuardar(nombre: String): File? {
+        val d = FileDialog(null as Frame?, "Guardar ficha", FileDialog.SAVE)
+        d.file = nombre
+        d.isVisible = true
+        val dir = d.directory ?: return null
+        val f = d.file ?: return null
+        return File(dir, if (f.lowercase().endsWith(".png")) f else "$f.png")
+    }
+
+    fun copiarImagenAlPortapapeles(f: File): Boolean =
+        try {
+            val img = ImageIO.read(f)
+            val t = object : Transferable {
+                override fun getTransferDataFlavors(): Array<DataFlavor> = arrayOf(DataFlavor.imageFlavor)
+                override fun isDataFlavorSupported(flavor: DataFlavor?): Boolean = flavor == DataFlavor.imageFlavor
+                override fun getTransferData(flavor: DataFlavor?): Any = img
+            }
+            Toolkit.getDefaultToolkit().systemClipboard.setContents(t, null)
+            true
+        } catch (e: Exception) {
+            false
+        }
+
+    fun abrir(f: File) {
+        Thread { runCatching { Desktop.getDesktop().open(f) } }.start()
+    }
+}
+
+// ---------------- Imágenes (soporta png, jpg, webp, gif) ----------------
+
+object Imagenes {
+    private val cache = object : LinkedHashMap<String, ImageBitmap>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean = size > 80
+    }
+
+    fun cargarSkia(ruta: String): SkImage? =
+        try {
+            SkImage.makeFromEncoded(File(ruta).readBytes())
+        } catch (e: Exception) {
+            null
+        }
+
+    fun escalada(img: SkImage, anchoMax: Int): SkImage {
+        if (img.width <= anchoMax || img.width <= 0) return img
+        val h = maxOf(1, (img.height.toLong() * anchoMax / img.width).toInt())
+        val s = Surface.makeRasterN32Premul(anchoMax, h)
+        s.canvas.drawImageRect(
+            img,
+            Rect.makeWH(img.width.toFloat(), img.height.toFloat()),
+            Rect.makeWH(anchoMax.toFloat(), h.toFloat()),
+            SamplingMode.LINEAR,
+            null,
+            true
+        )
+        return s.makeImageSnapshot()
+    }
+
+    fun miniatura(ruta: String, anchoMax: Int): ImageBitmap? {
+        val k = "$ruta@$anchoMax"
+        synchronized(cache) { cache[k]?.let { return it } }
+        val img = cargarSkia(ruta) ?: return null
+        val bm = escalada(img, anchoMax).toComposeImageBitmap()
+        synchronized(cache) { cache[k] = bm }
+        return bm
+    }
+
+    fun sinCache(ruta: String): ImageBitmap? = cargarSkia(ruta)?.toComposeImageBitmap()
+
+    fun olvidar(ruta: String) {
+        synchronized(cache) { cache.keys.removeIf { it.startsWith("$ruta@") } }
+    }
+
+    fun aBuffered(img: SkImage): BufferedImage? {
+        val data = img.encodeToData(EncodedImageFormat.PNG) ?: return null
+        return ImageIO.read(ByteArrayInputStream(data.bytes))
+    }
+}
+
+// ---------------- Iniciar con Windows ----------------
+
+object Autoinicio {
+    private val bat = File(
+        System.getenv("APPDATA") ?: System.getProperty("user.home"),
+        "Microsoft\\Windows\\Start Menu\\Programs\\Startup\\MisComisiones.bat"
+    )
+
+    val exe: String? get() = System.getProperty("jpackage.app-path")
+
+    fun activo(): Boolean = bat.exists()
+
+    fun poner(si: Boolean): Boolean =
+        try {
+            if (si) {
+                val e = exe
+                if (e == null) {
+                    false
+                } else {
+                    bat.parentFile?.mkdirs()
+                    bat.writeText("@echo off\r\nstart \"\" \"$e\" --oculto\r\n")
+                    true
+                }
+            } else {
+                bat.delete()
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+}
+@@@ src/main/kotlin/comisiones/ui/AjustesPantalla.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package comisiones.ui
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import comisiones.Acciones
+import comisiones.Almacen
+import comisiones.Archivos
+import comisiones.Autoinicio
+import comisiones.Avisos
+import comisiones.textoResumen
+import kotlin.math.roundToInt
+
+@Composable
+fun AjustesScreen() {
+    val d by Almacen.datos.collectAsState()
+    val aj = d.ajustes
+    var autoinicio by remember { mutableStateOf(Autoinicio.activo()) }
+    var hora by remember(aj.diarioHora) { mutableStateOf(aj.diarioHora.toString().padStart(2, '0')) }
+    var minuto by remember(aj.diarioMinuto) { mutableStateOf(aj.diarioMinuto.toString().padStart(2, '0')) }
+
+    Pantalla("Ajustes") { _ ->
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Seccion("Notificaciones y Windows") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Abrir Mis Comisiones al encender la laptop")
+                        Text(
+                            "Se abre escondida junto al reloj para avisarte de tus recordatorios.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoinicio,
+                        enabled = Autoinicio.exe != null,
+                        onCheckedChange = {
+                            if (Autoinicio.poner(it)) autoinicio = it else Avisos.decir("No se pudo cambiar")
+                        }
+                    )
+                }
+                HorizontalDivider()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Al cerrar la ventana, dejarla junto al reloj")
+                        Text(
+                            "Así siguen llegando los recordatorios. Para cerrarla del todo: clic derecho en su ícono → Salir.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(checked = aj.cerrarABandeja, onCheckedChange = { v -> Acciones.cambiarAjustes { it.copy(cerrarABandeja = v) } })
+                }
+            }
+
+            Seccion("Aviso diario") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Cada día te aviso a quién toca dibujar y qué comisiones van atrasadas",
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(checked = aj.diarioActivo, onCheckedChange = { v -> Acciones.cambiarAjustes { it.copy(diarioActivo = v) } })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Hora del aviso:")
+                    OutlinedTextField(
+                        value = hora,
+                        onValueChange = { v -> hora = v.filter { it.isDigit() }.take(2) },
+                        label = { Text("Hora") },
+                        singleLine = true,
+                        enabled = aj.diarioActivo,
+                        modifier = Modifier.width(84.dp)
+                    )
+                    Text(":")
+                    OutlinedTextField(
+                        value = minuto,
+                        onValueChange = { v -> minuto = v.filter { it.isDigit() }.take(2) },
+                        label = { Text("Min") },
+                        singleLine = true,
+                        enabled = aj.diarioActivo,
+                        modifier = Modifier.width(84.dp)
+                    )
+                    val h = hora.toIntOrNull()
+                    val mi = minuto.toIntOrNull()
+                    Button(
+                        enabled = aj.diarioActivo && h != null && mi != null && h in 0..23 && mi in 0..59,
+                        onClick = {
+                            Acciones.cambiarAjustes { it.copy(diarioHora = h ?: 10, diarioMinuto = mi ?: 0, ultimoResumen = "") }
+                            Avisos.decir("Listo: el aviso llegará a las ${hora.padStart(2, '0')}:${minuto.padStart(2, '0')}")
+                        }
+                    ) { Text("Guardar hora") }
+                }
+                OutlinedButton(onClick = {
+                    Avisos.decir(Almacen.datos.value.textoResumen() ?: "Hoy no hay nadie asignado ni comisiones atrasadas.")
+                }) { Text("Ver el aviso de hoy ahora") }
+            }
+
+            Seccion("Contador de días") {
+                Text("Los números se ponen totalmente rojos a los ${aj.diasRojo} días sin dibujar.")
+                Slider(
+                    value = aj.diasRojo.toFloat(),
+                    onValueChange = { v -> Acciones.cambiarAjustes { it.copy(diasRojo = v.roundToInt()) } },
+                    valueRange = 2f..30f,
+                    steps = 27
+                )
+                Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                    val dia = 24L * 60 * 60 * 1000
+                    val ahora = System.currentTimeMillis()
+                    listOf(0, aj.diasRojo / 2, aj.diasRojo).forEach { n ->
+                        DiasBadge(ahora - n * dia, false, aj.diasRojo)
+                    }
+                }
+            }
+
+            Seccion("Tus datos") {
+                Text(
+                    "Todo se guarda en tu laptop, en: ${Almacen.carpeta.absolutePath}\n" +
+                        "Cada día se hace una copia de respaldo automática (se guardan las últimas 2 semanas).",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedButton(onClick = { Archivos.abrir(Almacen.carpeta) }) { Text("Abrir carpeta de datos") }
+            }
+
+            Text(
+                "La traducción usa internet. Mis Comisiones · tus datos no salen de tu laptop (solo el texto a traducir).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+@@@ src/main/kotlin/comisiones/ui/App.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
+
+package comisiones.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
+import comisiones.Archivos
+import comisiones.Avisos
+import comisiones.Imagenes
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+
+// ---------------- Navegación ----------------
+
+sealed interface Ruta {
+    data object Clientes : Ruta
+    data object Horario : Ruta
+    data object Galeria : Ruta
+    data object Etiquetas : Ruta
+    data object Ajustes : Ruta
+    data class Cliente(val id: Long) : Ruta
+    data class Comision(val id: Long) : Ruta
+    data class Ficha(val id: Long) : Ruta
+    data class Etiqueta(val id: Long) : Ruta
+}
+
+class Nav {
+    val pila = mutableStateListOf<Ruta>(Ruta.Clientes)
+    val actual: Ruta get() = pila.last()
+    fun ir(r: Ruta) {
+        if (pila.last() != r) pila.add(r)
+    }
+    fun atras() {
+        if (pila.size > 1) pila.removeAt(pila.lastIndex)
+    }
+    fun raiz(r: Ruta) {
+        pila.clear()
+        pila.add(r)
+    }
+}
+
+// Visor de imagen a pantalla completa (se muestra encima de todo)
+object Visor {
+    var ruta by mutableStateOf<String?>(null)
+    var alBorrar by mutableStateOf<(() -> Unit)?>(null)
+    fun abrir(r: String, borrar: (() -> Unit)? = null) {
+        alBorrar = borrar
+        ruta = r
+    }
+    fun cerrar() {
+        ruta = null
+        alBorrar = null
+    }
+}
+
+private data class SeccionMenu(val ruta: Ruta, val nombre: String, val icono: ImageVector)
+
+@Composable
+fun AppUI(nav: Nav) {
+    val snack = remember { SnackbarHostState() }
+    LaunchedEffect(Unit) { Avisos.flujo.collect { snack.showSnackbar(it) } }
+
+    val secciones = listOf(
+        SeccionMenu(Ruta.Clientes, "Clientes", Icons.Default.People),
+        SeccionMenu(Ruta.Horario, "Horario", Icons.Default.CalendarMonth),
+        SeccionMenu(Ruta.Galeria, "Galería", Icons.Default.PhotoLibrary),
+        SeccionMenu(Ruta.Etiquetas, "Lo más pedido", Icons.Default.LocalOffer)
+    )
+    val raiz = nav.pila.first()
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Row(Modifier.fillMaxSize()) {
+            NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Spacer(Modifier.height(12.dp))
+                Icon(
+                    Icons.Default.Palette, contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(34.dp)
+                )
+                Spacer(Modifier.height(20.dp))
+                secciones.forEach { s ->
+                    NavigationRailItem(
+                        selected = raiz == s.ruta,
+                        onClick = { nav.raiz(s.ruta) },
+                        icon = { Icon(s.icono, contentDescription = null) },
+                        label = { Text(s.nombre) }
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                NavigationRailItem(
+                    selected = raiz == Ruta.Ajustes,
+                    onClick = { nav.raiz(Ruta.Ajustes) },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("Ajustes") }
+                )
+                Spacer(Modifier.height(12.dp))
+            }
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                when (val r = nav.actual) {
+                    Ruta.Clientes -> ClientesScreen(nav)
+                    Ruta.Horario -> HorarioScreen(nav)
+                    Ruta.Galeria -> GaleriaScreen(nav)
+                    Ruta.Etiquetas -> EtiquetasScreen(nav)
+                    Ruta.Ajustes -> AjustesScreen()
+                    is Ruta.Cliente -> ClienteScreen(nav, r.id)
+                    is Ruta.Comision -> ComisionScreen(nav, r.id)
+                    is Ruta.Ficha -> FichaScreen(nav, r.id)
+                    is Ruta.Etiqueta -> EtiquetaScreen(nav, r.id)
+                }
+            }
+        }
+        SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(16.dp))
+        val rv = Visor.ruta
+        if (rv != null) VisorImagen(rv)
+    }
+}
+
+@Composable
+private fun VisorImagen(ruta: String) {
+    var escala by remember(ruta) { mutableStateOf(1f) }
+    var desplazamiento by remember(ruta) { mutableStateOf(Offset.Zero) }
+    val bm by produceState<ImageBitmap?>(null, ruta) {
+        value = withContext(Dispatchers.IO) { Imagenes.miniatura(ruta, 2600) }
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.94f))
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { Visor.cerrar() }
+    ) {
+        val b = bm
+        if (b != null) {
+            androidx.compose.foundation.Image(
+                b,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp)
+                    .onPointerEvent(PointerEventType.Scroll) { ev ->
+                        val dy = ev.changes.firstOrNull()?.scrollDelta?.y ?: 0f
+                        escala = (escala * if (dy < 0) 1.15f else 1f / 1.15f).coerceIn(1f, 8f)
+                        if (escala == 1f) desplazamiento = Offset.Zero
+                    }
+                    .pointerInput(ruta) {
+                        detectDragGestures { cambio, arrastre ->
+                            cambio.consume()
+                            if (escala > 1f) desplazamiento += arrastre
+                        }
+                    }
+                    .graphicsLayer {
+                        scaleX = escala
+                        scaleY = escala
+                        translationX = desplazamiento.x
+                        translationY = desplazamiento.y
+                    }
+            )
+        } else {
+            CircularProgressIndicator(Modifier.align(Alignment.Center))
+        }
+        Row(
+            Modifier.align(Alignment.TopEnd).padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilledTonalButton(onClick = { Archivos.abrir(File(ruta)) }) {
+                Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Abrir en Windows")
+            }
+            val borrar = Visor.alBorrar
+            if (borrar != null) {
+                FilledTonalButton(onClick = {
+                    borrar()
+                    Visor.cerrar()
+                }) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Borrar")
+                }
+            }
+            FilledTonalButton(onClick = { Visor.cerrar() }) {
+                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Cerrar (Esc)")
+            }
+        }
+        Text(
+            "Rueda del mouse: acercar/alejar · Arrastra para moverte",
+            color = Color.White.copy(alpha = 0.6f),
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)
+        )
+    }
+}
+@@@ src/main/kotlin/comisiones/ui/Clientes.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
+package comisiones.ui
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import comisiones.Acciones
+import comisiones.Almacen
+import comisiones.Cliente
+import comisiones.Comision
+import comisiones.Etapas
+import comisiones.ResumenCliente
+import comisiones.cliente
+import comisiones.comisionesDe
+import comisiones.diasDesde
+import comisiones.formatoFecha
+import comisiones.resumenes
+
+// ======================= LISTA DE CLIENTES =======================
+
+@Composable
+fun ClientesScreen(nav: Nav) {
+    val d by Almacen.datos.collectAsState()
+    val clientes = remember(d) { d.resumenes() }
+    var busqueda by rememberSaveable { mutableStateOf("") }
+    var ordenDias by rememberSaveable { mutableStateOf(true) }
+    var nuevo by remember { mutableStateOf(false) }
+    var editar by remember { mutableStateOf<Cliente?>(null) }
+    var borrar by remember { mutableStateOf<Cliente?>(null) }
+
+    val lista = remember(clientes, busqueda, ordenDias) {
+        val f = clientes.filter { busqueda.isBlank() || it.cliente.nombre.contains(busqueda.trim(), ignoreCase = true) }
+        if (ordenDias) {
+            f.sortedWith(
+                compareByDescending<ResumenCliente> { it.activas > 0 }
+                    .thenByDescending { diasDesde(it.ultimo) }
+            )
+        } else f
+    }
+
+    Pantalla(
+        "Mis clientes",
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { nuevo = true },
+                icon = { Icon(Icons.Default.PersonAdd, contentDescription = null) },
+                text = { Text("Nuevo cliente") }
+            )
+        }
+    ) { _ ->
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = busqueda,
+                    onValueChange = { busqueda = it },
+                    placeholder = { Text("Buscar cliente…") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(selected = ordenDias, onClick = { ordenDias = true }, label = { Text("Más días sin dibujar") })
+                FilterChip(selected = !ordenDias, onClick = { ordenDias = false }, label = { Text("A-Z") })
+            }
+            Spacer(Modifier.height(8.dp))
+            if (lista.isEmpty()) {
+                Vacio(
+                    if (clientes.isEmpty()) "Aún no tienes clientes.\nHaz clic en «Nuevo cliente» para agregar el primero."
+                    else "Ningún cliente coincide con la búsqueda."
+                )
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(lista, key = { it.cliente.id }) { cs ->
+                        FilaCliente(cs, d.ajustes.diasRojo, d.comisionesDe(cs.cliente.id), nav,
+                            onEditar = { editar = cs.cliente }, onBorrar = { borrar = cs.cliente })
+                    }
+                }
+            }
+        }
+    }
+
+    if (nuevo) {
+        DialogoCampos(
+            "Nuevo cliente",
+            listOf(
+                Campo("Nombre", obligatorio = true),
+                Campo("Contacto (Discord, Twitter, correo…)"),
+                Campo("Notas", multilinea = true)
+            ),
+            confirmar = "Agregar",
+            onDismiss = { nuevo = false }
+        ) { v ->
+            nuevo = false
+            Acciones.guardarCliente(null, v[0], v[1], v[2])
+        }
+    }
+    editar?.let { c -> DialogoEditarCliente(c) { editar = null } }
+    borrar?.let { c ->
+        DialogoConfirmar(
+            "¿Eliminar a ${c.nombre}?",
+            "Se borrarán también todas sus comisiones, referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = null }
+        ) {
+            borrar = null
+            Acciones.borrarCliente(c.id)
+        }
+    }
+}
+
+@Composable
+private fun DialogoEditarCliente(c: Cliente, cerrar: () -> Unit) {
+    DialogoCampos(
+        "Editar cliente",
+        listOf(
+            Campo("Nombre", c.nombre, obligatorio = true),
+            Campo("Contacto", c.contacto),
+            Campo("Notas", c.notas, multilinea = true)
+        ),
+        onDismiss = cerrar
+    ) { v ->
+        cerrar()
+        Acciones.guardarCliente(c.id, v[0], v[1], v[2])
+    }
+}
+
+@Composable
+private fun FilaCliente(
+    cs: ResumenCliente,
+    diasRojo: Int,
+    comisiones: List<Comision>,
+    nav: Nav,
+    onEditar: () -> Unit,
+    onBorrar: () -> Unit
+) {
+    var expandido by rememberSaveable(cs.cliente.id) { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    Card(onClick = { nav.ir(Ruta.Cliente(cs.cliente.id)) }, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(start = 14.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Avatar(cs.cliente.nombre)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(cs.cliente.nombre, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "${cs.activas} activa(s) · ${cs.total} en total",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            DiasBadge(
+                ultimo = if (cs.activas > 0) cs.ultimo else null,
+                terminada = cs.total > 0 && cs.activas == 0,
+                diasRojo = diasRojo
+            )
+            Spacer(Modifier.width(4.dp))
+            IconButton(onClick = { expandido = !expandido }) {
+                Icon(if (expandido) Icons.Default.ExpandLess else Icons.Default.ExpandMore, contentDescription = "Desglosar")
+            }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Más") }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Editar") },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                        onClick = { menu = false; onEditar() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Eliminar") },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                        onClick = { menu = false; onBorrar() }
+                    )
+                }
+            }
+        }
+        AnimatedVisibility(visible = expandido) {
+            Column(Modifier.padding(start = 8.dp, end = 12.dp, bottom = 10.dp)) {
+                HorizontalDivider(Modifier.padding(bottom = 4.dp, start = 6.dp))
+                if (comisiones.isEmpty()) {
+                    Text(
+                        "Sin comisiones todavía",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+                comisiones.forEach { m ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { nav.ir(Ruta.Comision(m.id)) }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = m.terminada, onCheckedChange = { Acciones.setTerminada(m.id, it) })
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                m.titulo,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textDecoration = if (m.terminada) TextDecoration.LineThrough else null
+                            )
+                            Text(
+                                if (m.terminada) "Terminada" else "Vas en: ${Etapas.nombres.getOrElse(m.etapa) { "" }}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DiasBadge(m.ultimoTrabajo, m.terminada, diasRojo)
+                    }
+                }
+                TextButton(onClick = { nav.ir(Ruta.Cliente(cs.cliente.id)) }, modifier = Modifier.align(Alignment.End)) {
+                    Text("Abrir cliente")
+                }
+            }
+        }
+    }
+}
+
+// ======================= DETALLE DE UN CLIENTE =======================
+
+@Composable
+fun ClienteScreen(nav: Nav, id: Long) {
+    val d by Almacen.datos.collectAsState()
+    val c = d.cliente(id)
+    val comisiones = remember(d, id) { d.comisionesDe(id) }
+    var filtro by rememberSaveable { mutableIntStateOf(0) }
+    var nueva by remember { mutableStateOf(false) }
+    var editar by remember { mutableStateOf(false) }
+    var borrar by remember { mutableStateOf(false) }
+
+    val activas = comisiones.count { !it.terminada }
+    val terminadas = comisiones.size - activas
+    val lista = comisiones.filter {
+        when (filtro) {
+            0 -> !it.terminada
+            1 -> it.terminada
+            else -> true
+        }
+    }
+
+    Pantalla(
+        c?.nombre ?: "Cliente",
+        onBack = { nav.atras() },
+        acciones = {
+            if (c != null) {
+                IconButton(onClick = { editar = true }) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+                IconButton(onClick = { borrar = true }) { Icon(Icons.Default.Delete, contentDescription = "Eliminar") }
+            }
+        },
+        fab = {
+            ExtendedFloatingActionButton(
+                onClick = { nueva = true },
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                text = { Text("Nueva comisión") }
+            )
+        }
+    ) { _ ->
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (c != null && (c.contacto.isNotBlank() || c.notas.isNotBlank())) {
+                item {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (c.contacto.isNotBlank()) Text("Contacto: ${c.contacto}", style = MaterialTheme.typography.bodyMedium)
+                            if (c.notas.isNotBlank()) Text(c.notas, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = filtro == 0, onClick = { filtro = 0 }, label = { Text("Activas ($activas)") })
+                    FilterChip(selected = filtro == 1, onClick = { filtro = 1 }, label = { Text("Listas ($terminadas)") })
+                    FilterChip(selected = filtro == 2, onClick = { filtro = 2 }, label = { Text("Todas") })
+                }
+            }
+            if (lista.isEmpty()) {
+                item {
+                    Vacio(if (comisiones.isEmpty()) "Este cliente no tiene comisiones.\nHaz clic en «Nueva comisión»." else "No hay comisiones aquí.")
+                }
+            }
+            items(lista, key = { it.id }) { m ->
+                TarjetaComision(m, d.ajustes.diasRojo) { nav.ir(Ruta.Comision(m.id)) }
+            }
+        }
+    }
+
+    if (nueva) {
+        DialogoCampos(
+            "Nueva comisión",
+            listOf(
+                Campo("Título (ej. Miku en un parque)", obligatorio = true),
+                Campo("Lo que pidió el cliente (pégalo en inglés)", multilinea = true)
+            ),
+            confirmar = "Crear",
+            onDismiss = { nueva = false }
+        ) { v ->
+            nueva = false
+            val nuevoId = Acciones.crearComision(id, v[0], v[1])
+            nav.ir(Ruta.Comision(nuevoId))
+        }
+    }
+    if (editar && c != null) DialogoEditarCliente(c) { editar = false }
+    if (borrar && c != null) {
+        DialogoConfirmar(
+            "¿Eliminar a ${c.nombre}?",
+            "Se borrarán también todas sus comisiones, referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = false }
+        ) {
+            borrar = false
+            Acciones.borrarCliente(c.id)
+            nav.atras()
+        }
+    }
+}
+
+@Composable
+fun TarjetaComision(m: Comision, diasRojo: Int, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(start = 4.dp, end = 12.dp, top = 8.dp, bottom = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = m.terminada, onCheckedChange = { Acciones.setTerminada(m.id, it) })
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        m.titulo,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textDecoration = if (m.terminada) TextDecoration.LineThrough else null
+                    )
+                    val rec = m.recordatorio
+                    if (rec != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Alarm, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(formatoFecha(rec), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                        }
+                    }
+                }
+                DiasBadge(m.ultimoTrabajo, m.terminada, diasRojo)
+            }
+            Spacer(Modifier.size(6.dp))
+            Row(Modifier.padding(start = 8.dp)) {
+                EtapasSelector(m.etapa, m.terminada, onElegir = { Acciones.setEtapa(m.id, it) }, compacto = true)
+            }
+            if (!m.terminada) {
+                TextButton(onClick = { Acciones.dibujeHoy(m.id) }, modifier = Modifier.align(Alignment.End)) {
+                    Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Dibujé hoy")
+                }
+            }
+        }
+    }
+}
