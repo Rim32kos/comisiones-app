@@ -1,0 +1,382 @@
+@@@ src/main/kotlin/comisiones/ui/ComisionPantalla.kt @@@
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+
+package comisiones.ui
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import comisiones.Acciones
+import comisiones.Almacen
+import comisiones.Archivos
+import comisiones.Referencia
+import comisiones.TipoEtiqueta
+import comisiones.cliente
+import comisiones.comision
+import comisiones.conteoEtiquetas
+import comisiones.etiquetasDe
+import comisiones.formatoFecha
+import comisiones.refsDe
+import comisiones.usos
+
+@Composable
+fun ComisionScreen(nav: Nav, id: Long) {
+    val d by Almacen.datos.collectAsState()
+    val m = d.comision(id)
+    if (m == null) {
+        Pantalla("Comisión", onBack = { nav.atras() }) { _ -> Vacio("Esta comisión ya no existe.") }
+        return
+    }
+    val cliente = d.cliente(m.clienteId)
+    val refs = remember(d, id) { d.refsDe(id) }
+    val tags = remember(d, id) { d.etiquetasDe(m) }
+
+    var editar by remember { mutableStateOf(false) }
+    var borrar by remember { mutableStateOf(false) }
+    var nuevoTexto by remember { mutableStateOf(false) }
+    var editarRef by remember { mutableStateOf<Referencia?>(null) }
+    var nuevaEtiqueta by remember { mutableStateOf(false) }
+    var recordatorio by remember { mutableStateOf(false) }
+
+    fun agregarImagenes() {
+        val archivos = Archivos.elegirImagenes()
+        if (archivos.isNotEmpty()) Acciones.agregarArchivos(id, archivos)
+    }
+
+    Pantalla(
+        m.titulo,
+        onBack = { nav.atras() },
+        acciones = {
+            IconButton(onClick = { editar = true }) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+            IconButton(onClick = { borrar = true }) { Icon(Icons.Default.Delete, contentDescription = "Eliminar") }
+        }
+    ) { _ ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(
+                    onClick = { nav.ir(Ruta.Cliente(m.clienteId)) },
+                    label = { Text(cliente?.nombre ?: "Cliente") },
+                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                )
+                Spacer(Modifier.weight(1f))
+                Button(onClick = { nav.ir(Ruta.Ficha(id)) }) {
+                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Ver ficha en español")
+                }
+            }
+
+            // ---------- Progreso + recordatorio en dos columnas ----------
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+                Box(Modifier.weight(1.4f).fillMaxHeight()) {
+                    Seccion("Progreso") {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = m.terminada, onCheckedChange = { Acciones.setTerminada(id, it) })
+                            Text(
+                                if (m.terminada) "¡Comisión terminada!" else "Marcar como terminada",
+                                fontWeight = if (m.terminada) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier.weight(1f)
+                            )
+                            DiasBadge(m.ultimoTrabajo, m.terminada, d.ajustes.diasRojo)
+                        }
+                        Text(
+                            "Haz clic en la etapa en la que vas:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        EtapasSelector(m.etapa, m.terminada, onElegir = { Acciones.setEtapa(id, it) })
+                        if (!m.terminada) {
+                            OutlinedButton(onClick = { Acciones.dibujeHoy(id) }, modifier = Modifier.fillMaxWidth()) {
+                                Icon(Icons.Default.Brush, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Dibujé hoy (contador a 0)")
+                            }
+                        }
+                    }
+                }
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    Seccion("Recordatorio") {
+                        val rec = m.recordatorio
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Alarm, contentDescription = null,
+                                tint = if (rec != null) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(if (rec != null) formatoFecha(rec) else "Sin recordatorio")
+                                if (rec != null && m.notaRecordatorio.isNotBlank()) {
+                                    Text(m.notaRecordatorio, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { recordatorio = true }) { Text(if (rec == null) "Poner recordatorio" else "Cambiar") }
+                            if (rec != null) TextButton(onClick = { Acciones.quitarRecordatorio(id) }) { Text("Quitar") }
+                        }
+                        Text(
+                            "Te llegará una notificación de Windows aunque cierres la ventana.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // ---------- Pedido (inglés | español lado a lado) ----------
+            Seccion("Lo que pidió", accion = {
+                TextButton(onClick = { editar = true }) {
+                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Editar")
+                }
+            }) {
+                val traduciendo = Acciones.traduciendo["d$id"] == true
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.height(IntrinsicSize.Min)) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Original (inglés)", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(4.dp))
+                        SelectionContainer {
+                            Text(m.descEn.ifBlank { "(vacío — haz clic en «Editar» para pegar lo que te pidió)" })
+                        }
+                    }
+                    VerticalDivider()
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Español",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                enabled = m.descEn.isNotBlank() && !traduciendo,
+                                onClick = { Acciones.traducirDescripcion(id) }
+                            ) {
+                                if (traduciendo) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                else Icon(Icons.Default.Translate, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(if (traduciendo) "Traduciendo…" else "Traducir")
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                m.descEs.ifBlank { if (m.descEn.isBlank()) "—" else "(sin traducir)" },
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ---------- Etiquetas ----------
+            Seccion("Personajes, poses y etiquetas", accion = {
+                TextButton(onClick = { nuevaEtiqueta = true }) { Text("+ Agregar") }
+            }) {
+                if (tags.isEmpty()) {
+                    Text(
+                        "Agrega el personaje (ej. Hatsune Miku), la pose, el OC… así sabrás qué te piden más.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TipoEtiqueta.nombres.forEachIndexed { tipo, nombre ->
+                    val deTipo = tags.filter { it.tipo == tipo }
+                    if (deTipo.isNotEmpty()) {
+                        Text(nombre, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            deTipo.forEach { t ->
+                                InputChip(
+                                    selected = false,
+                                    onClick = { nav.ir(Ruta.Etiqueta(t.id)) },
+                                    label = { Text("${t.nombre}  ×${d.usos(t.id)}") },
+                                    trailingIcon = {
+                                        Icon(
+                                            Icons.Default.Close, contentDescription = "Quitar",
+                                            modifier = Modifier.size(18.dp).clickable { Acciones.quitarEtiqueta(id, t.id) }
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---------- Referencias ----------
+            val imagenes = refs.filter { it.tipo == 0 }
+            val textos = refs.filter { it.tipo == 1 }
+            Seccion("Referencias") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { agregarImagenes() }) {
+                        Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Agregar imágenes")
+                    }
+                    OutlinedButton(onClick = { Acciones.pegarDelPortapapeles(id) }) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Pegar imagen copiada")
+                    }
+                    OutlinedButton(onClick = { nuevoTexto = true }) {
+                        Icon(Icons.Default.NoteAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Agregar texto")
+                    }
+                }
+                if (refs.isEmpty()) {
+                    Text(
+                        "Sube las imágenes que te mandó el cliente (o cópialas de Discord y usa «Pegar imagen copiada»), " +
+                            "o pega sus mensajes: se traducen solos.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (imagenes.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        imagenes.forEach { r ->
+                            ImagenArchivo(
+                                r.ruta, 400,
+                                Modifier
+                                    .size(width = 170.dp, height = 210.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { Visor.abrir(r.ruta) { Acciones.borrarRef(r.id) } },
+                                ContentScale.Crop
+                            )
+                        }
+                    }
+                }
+                textos.forEach { r ->
+                    TarjetaTexto(
+                        r,
+                        traduciendo = Acciones.traduciendo["r${r.id}"] == true,
+                        onTraducir = { Acciones.traducirRef(r.id) },
+                        onEditar = { editarRef = r },
+                        onBorrar = { Acciones.borrarRef(r.id) }
+                    )
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    // ---------- Diálogos ----------
+    if (editar) {
+        DialogoCampos(
+            "Editar comisión",
+            listOf(
+                Campo("Título", m.titulo, obligatorio = true),
+                Campo("Lo que pidió (en inglés)", m.descEn, multilinea = true)
+            ),
+            onDismiss = { editar = false }
+        ) { v ->
+            editar = false
+            Acciones.editarComision(id, v[0], v[1])
+        }
+    }
+    if (borrar) {
+        DialogoConfirmar(
+            "¿Eliminar «${m.titulo}»?",
+            "Se borrarán sus referencias e imágenes. No se puede deshacer.",
+            onDismiss = { borrar = false }
+        ) {
+            borrar = false
+            Acciones.borrarComision(id)
+            nav.atras()
+        }
+    }
+    if (nuevoTexto) {
+        DialogoCampos(
+            "Texto de referencia",
+            listOf(Campo("Pega lo que escribió el cliente (inglés)", multilinea = true, obligatorio = true)),
+            confirmar = "Agregar y traducir",
+            onDismiss = { nuevoTexto = false }
+        ) { v ->
+            nuevoTexto = false
+            Acciones.agregarTexto(id, v[0])
+        }
+    }
+    editarRef?.let { r ->
+        DialogoCampos(
+            "Editar texto",
+            listOf(Campo("Texto (inglés)", r.textoEn, multilinea = true, obligatorio = true)),
+            onDismiss = { editarRef = null }
+        ) { v ->
+            editarRef = null
+            Acciones.editarTexto(r.id, v[0])
+        }
+    }
+    if (nuevaEtiqueta) {
+        DialogoEtiqueta(d.conteoEtiquetas(), onDismiss = { nuevaEtiqueta = false }) { nombre, tipo ->
+            Acciones.agregarEtiqueta(id, nombre, tipo)
+            nuevaEtiqueta = false
+        }
+    }
+    if (recordatorio) {
+        DialogoRecordatorio(m.recordatorio, m.notaRecordatorio, onDismiss = { recordatorio = false }) { en, nota ->
+            recordatorio = false
+            Acciones.ponerRecordatorio(id, en, nota)
+        }
+    }
+}
+
+@Composable
+private fun TarjetaTexto(
+    r: Referencia,
+    traduciendo: Boolean,
+    onTraducir: () -> Unit,
+    onEditar: () -> Unit,
+    onBorrar: () -> Unit
+) {
+    var confirmar by remember { mutableStateOf(false) }
+    TarjetaChica {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Inglés", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SelectionContainer { Text(r.textoEn, style = MaterialTheme.typography.bodyMedium) }
+            }
+            Column(Modifier.weight(1f)) {
+                Text("Español", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                SelectionContainer {
+                    Text(
+                        if (traduciendo) "Traduciendo…" else r.textoEs.ifBlank { "(sin traducir)" },
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            IconButton(onClick = onTraducir, enabled = !traduciendo) { Icon(Icons.Default.Translate, contentDescription = "Traducir") }
+            IconButton(onClick = onEditar) { Icon(Icons.Default.Edit, contentDescription = "Editar") }
+            IconButton(onClick = { confirmar = true }) { Icon(Icons.Default.Delete, contentDescription = "Borrar") }
+        }
+    }
+    if (confirmar) {
+        DialogoConfirmar("¿Borrar este texto?", r.textoEn.take(120), onDismiss = { confirmar = false }) {
+            confirmar = false
+            onBorrar()
+        }
+    }
+}
